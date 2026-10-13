@@ -273,10 +273,14 @@ class _ChoiceArcPainter extends CustomPainter {
 class SelectionFrame extends StatelessWidget {
   const SelectionFrame({
     required this.bounds,
+    required this.toPage,
+    required this.onMoveStart,
     required this.onMove,
     required this.onMoveEnd,
+    required this.onScaleStart,
     required this.onScale,
     required this.onScaleEnd,
+    required this.onRotateStart,
     required this.onRotate,
     required this.onRotateEnd,
     required this.onMenu,
@@ -284,26 +288,29 @@ class SelectionFrame extends StatelessWidget {
   });
 
   final Rect bounds;
-  /// Page-space pointer position (not frame-local delta).
+  /// Convert a global pointer into page space.
+  final Offset Function(Offset global) toPage;
+  final void Function(Offset pagePoint) onMoveStart;
   final void Function(Offset pagePoint) onMove;
   final VoidCallback onMoveEnd;
+  final void Function(SelectionHandle handle, Offset pagePoint) onScaleStart;
   final void Function(SelectionHandle handle, Offset pagePoint) onScale;
   final VoidCallback onScaleEnd;
+  final void Function(Offset pagePoint) onRotateStart;
   final void Function(Offset pagePoint) onRotate;
   final VoidCallback onRotateEnd;
   final VoidCallback onMenu;
 
+  static const _corners = [
+    SelectionHandle.topLeft,
+    SelectionHandle.topRight,
+    SelectionHandle.bottomRight,
+    SelectionHandle.bottomLeft,
+  ];
+
   @override
   Widget build(BuildContext context) {
     final stem = 16 + bounds.shortestSide * 0.12;
-    Offset pagePoint(Offset global) {
-      final box = context.findRenderObject() as RenderBox?;
-      if (box == null) {
-        return global;
-      }
-      return box.globalToLocal(global);
-    }
-
     return Stack(
       clipBehavior: Clip.none,
       children: [
@@ -319,8 +326,10 @@ class SelectionFrame extends StatelessWidget {
                   GestureRecognizerFactoryWithHandlers<PanGestureRecognizer>(
                     PanGestureRecognizer.new,
                     (instance) {
+                      instance.onStart = (details) =>
+                          onMoveStart(toPage(details.globalPosition));
                       instance.onUpdate = (details) =>
-                          onMove(pagePoint(details.globalPosition));
+                          onMove(toPage(details.globalPosition));
                       instance.onEnd = (_) => onMoveEnd();
                     },
                   ),
@@ -335,18 +344,18 @@ class SelectionFrame extends StatelessWidget {
                   ),
             },
             child: CustomPaint(
-              painter: _DashRectPainter(),
+              painter: const _DashRectPainter(),
               child: const SizedBox.expand(),
             ),
           ),
         ),
-        for (final handle in SelectionHandle.values)
-          if (handle != SelectionHandle.rotate)
-            _knob(
-              handle.anchor(bounds),
-              onPan: (global) => onScale(handle, pagePoint(global)),
-              onEnd: onScaleEnd,
-            ),
+        for (final handle in _corners)
+          _knob(
+            handle.anchor(bounds),
+            onStart: (global) => onScaleStart(handle, toPage(global)),
+            onPan: (global) => onScale(handle, toPage(global)),
+            onEnd: onScaleEnd,
+          ),
         Positioned(
           left: bounds.center.dx - 0.5,
           top: bounds.top - stem,
@@ -356,7 +365,8 @@ class SelectionFrame extends StatelessWidget {
         ),
         _knob(
           Offset(bounds.center.dx, bounds.top - stem),
-          onPan: (global) => onRotate(pagePoint(global)),
+          onStart: (global) => onRotateStart(toPage(global)),
+          onPan: (global) => onRotate(toPage(global)),
           onEnd: onRotateEnd,
         ),
       ],
@@ -365,6 +375,7 @@ class SelectionFrame extends StatelessWidget {
 
   Widget _knob(
     Offset center, {
+    required void Function(Offset global) onStart,
     required void Function(Offset global) onPan,
     required VoidCallback onEnd,
   }) {
@@ -376,6 +387,7 @@ class SelectionFrame extends StatelessWidget {
       height: size,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
+        onPanStart: (details) => onStart(details.globalPosition),
         onPanUpdate: (details) => onPan(details.globalPosition),
         onPanEnd: (_) => onEnd(),
         child: DecoratedBox(
@@ -438,6 +450,8 @@ extension SelectionHandleGeometry on SelectionHandle {
 }
 
 class _DashRectPainter extends CustomPainter {
+  const _DashRectPainter();
+
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
@@ -468,7 +482,7 @@ class _DashRectPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant _DashRectPainter oldDelegate) => false;
 }
 
 /// Absolute scale matrix from gesture start (opposite corner/edge fixed).

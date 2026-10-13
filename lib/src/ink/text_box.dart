@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui';
 
 class TextBox {
@@ -71,4 +72,35 @@ class TextBox {
   }
 
   Rect get rect => Rect.fromLTWH(x, y, width, height);
+}
+
+/// Preserve stacking order when editing an existing text box.
+List<Object?> replaceTextBox(List<Object?> objects, TextBox box) {
+  var found = false;
+  final result = <Object?>[];
+  for (final object in objects) {
+    final existing = TextBox.fromObject(object);
+    if (existing?.id == box.id) {
+      if (!found) {
+        final same =
+            existing!.source == box.source &&
+            existing.x == box.x &&
+            existing.y == box.y &&
+            existing.width == box.width &&
+            existing.height == box.height;
+        final version = math.max(
+          box.version,
+          existing.version + (same ? 0 : 1),
+        );
+        result.add(box.copyWith(version: version).toJson());
+      }
+      found = true;
+    } else {
+      result.add(object);
+    }
+  }
+  if (!found) {
+    result.add(box.copyWith(version: math.max(1, box.version)).toJson());
+  }
+  return result;
 }

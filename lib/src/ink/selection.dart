@@ -24,6 +24,18 @@ bool pointInPolygon(Offset point, List<Offset> polygon) {
   for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
     final a = polygon[j];
     final b = polygon[i];
+    final ab = b - a;
+    final ap = point - a;
+    final length2 = ab.distanceSquared;
+    final cross = ab.dx * ap.dy - ab.dy * ap.dx;
+    final dot = ab.dx * ap.dx + ab.dy * ap.dy;
+    if ((length2 == 0 && ap.distanceSquared <= 1e-12) ||
+        (length2 > 0 &&
+            cross.abs() <= 1e-7 * math.sqrt(length2) &&
+            dot >= 0 &&
+            dot <= length2)) {
+      return true;
+    }
     final intersect =
         ((b.dy > point.dy) != (a.dy > point.dy)) &&
         (point.dx <
@@ -113,7 +125,12 @@ bool textHitsRegion(TextBox box, {Rect? rect, List<Offset>? polygon}) {
     final a = corners[index];
     final b = corners[(index + 1) % corners.length];
     for (var edge = 0; edge < polygon.length; edge++) {
-      if (_segmentsCross(a, b, polygon[edge], polygon[(edge + 1) % polygon.length])) {
+      if (_segmentsCross(
+        a,
+        b,
+        polygon[edge],
+        polygon[(edge + 1) % polygon.length],
+      )) {
         return true;
       }
     }
@@ -299,11 +316,24 @@ Rect boundsOfObjects({
   return Rect.fromLTRB(left, top, right, bottom);
 }
 
-StrokeObject mapStroke(StrokeObject stroke, Offset Function(Offset) map) {
+StrokeObject mapStroke(
+  StrokeObject stroke,
+  Offset Function(Offset) map, {
+  double widthScale = 1,
+}) {
+  final scale = widthScale <= 0 ? 1.0 : widthScale;
   return stroke.copyWith(
+    baseWidth: stroke.baseWidth * scale,
+    dashCycle: stroke.dashCycle * scale,
+    dashOffset: stroke.dashOffset * scale,
     points: [
       for (final point in stroke.points)
-        point.copyWith(x: map(Offset(point.x, point.y)).dx, y: map(Offset(point.x, point.y)).dy),
+        point.copyWith(
+          x: map(Offset(point.x, point.y)).dx,
+          y: map(Offset(point.x, point.y)).dy,
+          width: point.width * scale,
+          height: point.height * scale,
+        ),
     ],
   );
 }
@@ -325,7 +355,12 @@ TextBox mapTextBox(TextBox box, Offset Function(Offset) map) {
     right = right > corner.dx ? right : corner.dx;
     bottom = bottom > corner.dy ? bottom : corner.dy;
   }
-  return box.copyWith(x: left, y: top, width: right - left, height: bottom - top);
+  return box.copyWith(
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+  );
 }
 
 Offset mapMove(Offset point, Offset delta) => point + delta;

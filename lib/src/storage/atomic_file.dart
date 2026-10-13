@@ -1,19 +1,44 @@
+import 'dart:isolate';
+
+import 'note_document.dart';
+
 import 'dart:io';
 
-/// Writes [contents] to a temporary file, then replaces [file].
-///
-/// A crash while the temporary file is being written leaves the previous
-/// [file] in place.
+int _sequence = 0;
+
+/// Publish a flushed file. Failed replacements retain the previous contents.
 Future<void> writeAtomic(File file, String contents) async {
   await file.parent.create(recursive: true);
-  final temporary = File('${file.path}.tmp');
-  await temporary.writeAsString(contents, flush: true);
+  final suffix =
+      '${pid}_${DateTime.now().microsecondsSinceEpoch}_${_sequence++}';
+  final temporary = File('${file.path}.$suffix.tmp');
   try {
-    await temporary.rename(file.path);
-  } on FileSystemException {
-    if (await file.exists()) {
-      await file.delete();
+    await temporary.writeAsString(contents, flush: true);
+    try {
+      await temporary.rename(file.path);
+    } on FileSystemException {
+      // POSIX rename replaces atomically. Windows may refuse an existing path.
+      // Never delete the original in response to an arbitrary I/O error.
+      if (!Platform.isWindows || !await file.exists()) rethrow;
+      final backup = File('${file.path}.$suffix.bak');
+      await file.rename(backup.path);
+      try {
+        await temporary.rename(file.path);
+      } catch (_) {
+        await backup.rename(file.path);
+        rethrow;
+      }
+      await backup.delete();
     }
-    await temporary.rename(file.path);
+  } finally {
+    if (await temporary.exists()) await temporary.delete();
   }
+}
+
+/// Encoding a large layer/long stroke must not block handwriting frames.
+Future<void> writeJsonAtomic(File file, Object value) async {
+  final path = file.path;
+  await Isolate.run(() async {
+    await writeAtomic(File(path), encodeJson(value));
+  });
 }

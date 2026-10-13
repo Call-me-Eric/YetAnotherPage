@@ -102,6 +102,9 @@ class _TextFrameState extends State<_TextFrame> {
   late double _height = widget.box.height;
   var _dragging = false;
   var _committed = false;
+  Widget? _renderedMarkdown;
+  String? _renderedSource;
+  double? _renderedWidth;
 
   @override
   void initState() {
@@ -161,6 +164,18 @@ class _TextFrameState extends State<_TextFrame> {
     widget.onCommit(_controller.text);
   }
 
+  Widget _cachedMarkdown() {
+    final width = _width - textBoxPadding * 2;
+    if (_renderedMarkdown == null ||
+        _renderedSource != widget.box.source ||
+        _renderedWidth != width) {
+      _renderedSource = widget.box.source;
+      _renderedWidth = width;
+      _renderedMarkdown = MarkdownBody(source: widget.box.source, width: width);
+    }
+    return _renderedMarkdown!;
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -178,85 +193,84 @@ class _TextFrameState extends State<_TextFrame> {
             width: _width,
             height: _height,
             child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: widget.editing ? const Color(0xF7FFFFFF) : null,
-          border: widget.editing
-              ? Border.all(color: scheme.primary, width: 1.5)
-              : null,
-        ),
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            Positioned.fill(
-              child: Padding(
-                padding: const EdgeInsets.all(textBoxPadding),
-                child: widget.editing
-                    ? TextField(
-                        controller: _controller,
-                        focusNode: _focus,
-                        expands: true,
-                        maxLines: null,
-                        style: const TextStyle(
-                          fontSize: textBodySize,
-                          height: 1.3,
-                          color: Colors.black,
-                        ),
-                        decoration: const InputDecoration(
-                          border: InputBorder.none,
-                          isCollapsed: true,
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                        onChanged: widget.onDraft,
-                      )
-                    : ClipRect(
-                        child: MarkdownBody(
-                          source: widget.box.source,
-                          width: _width - textBoxPadding * 2,
-                        ),
-                      ),
+              decoration: BoxDecoration(
+                color: widget.editing ? const Color(0xF7FFFFFF) : null,
+                border: widget.editing
+                    ? Border.all(color: scheme.primary, width: 1.5)
+                    : null,
               ),
-            ),
-            if (widget.interactive && widget.selected && !widget.editing)
-              Positioned(
-                left: _width - 16,
-                top: _height - 16,
-                child: Listener(
-                  onPointerDown: (event) => widget.onResizeDown(event.pointer),
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onPanUpdate: (details) {
-                      setState(() {
-                        _dragging = true;
-                        _width = (_width + details.delta.dx).clamp(64.0, 2000.0);
-                        _height = (_height + details.delta.dy).clamp(
-                          40.0,
-                          2000.0,
-                        );
-                      });
-                    },
-                    onPanEnd: (_) {
-                      _dragging = false;
-                      widget.onResize(_width, _height);
-                    },
-                    child: const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          border: Border.fromBorderSide(
-                            BorderSide(color: Color(0xFF222222)),
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Positioned.fill(
+                    child: Padding(
+                      padding: const EdgeInsets.all(textBoxPadding),
+                      child: widget.editing
+                          ? TextField(
+                              controller: _controller,
+                              focusNode: _focus,
+                              expands: true,
+                              maxLines: null,
+                              style: const TextStyle(
+                                fontSize: textBodySize,
+                                height: 1.3,
+                                color: Colors.black,
+                              ),
+                              decoration: const InputDecoration(
+                                border: InputBorder.none,
+                                isCollapsed: true,
+                                contentPadding: EdgeInsets.zero,
+                              ),
+                              onChanged: widget.onDraft,
+                            )
+                          : ClipRect(child: _cachedMarkdown()),
+                    ),
+                  ),
+                  if (widget.interactive && widget.selected && !widget.editing)
+                    Positioned(
+                      left: _width - 16,
+                      top: _height - 16,
+                      child: Listener(
+                        onPointerDown: (event) =>
+                            widget.onResizeDown(event.pointer),
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onPanUpdate: (details) {
+                            setState(() {
+                              _dragging = true;
+                              _width = (_width + details.delta.dx).clamp(
+                                64.0,
+                                2000.0,
+                              );
+                              _height = (_height + details.delta.dy).clamp(
+                                40.0,
+                                2000.0,
+                              );
+                            });
+                          },
+                          onPanEnd: (_) {
+                            _dragging = false;
+                            widget.onResize(_width, _height);
+                          },
+                          child: const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                border: Border.fromBorderSide(
+                                  BorderSide(color: Color(0xFF222222)),
+                                ),
+                              ),
+                            ),
                           ),
                         ),
                       ),
                     ),
-                  ),
-                ),
+                ],
               ),
-            ],
+            ),
           ),
-        ),
-      ),
         ],
       ),
     );

@@ -5,6 +5,40 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yet_another_page/src/ink/stroke.dart';
 
 void main() {
+  test('finalized geometry cannot be mutated through its input list', () {
+    final points = [mouseSample(x: 1, y: 2, time: 0, baseWidth: 3)];
+    final stroke = StrokeObject(
+      id: 'immutable',
+      tool: 'pen',
+      color: penColor,
+      baseWidth: 3,
+      points: points,
+      finalized: true,
+    );
+    points.clear();
+    expect(stroke.points, hasLength(1));
+    expect(() => stroke.points.clear(), throwsUnsupportedError);
+  });
+
+  test('local fitting is independent of a long stroke time offset', () {
+    List<StrokePoint> circle(double offset) => [
+      for (var i = 0; i < 120; i++)
+        mouseSample(
+          x: 100 + 40 * math.cos(i * 0.12),
+          y: 100 + 40 * math.sin(i * 0.12),
+          time: offset + i * 0.008,
+          baseWidth: 3,
+        ),
+    ];
+    final short = causalPaint(circle(0), 3);
+    final long = causalPaint(circle(3600), 3);
+    expect(long.length, short.length);
+    for (var i = 0; i < short.length; i++) {
+      expect(long[i].x, closeTo(short[i].x, 0.0001));
+      expect(long[i].y, closeTo(short[i].y, 0.0001));
+    }
+  });
+
   test('mouse samples use fixed pressure and a provisional width', () {
     final point = mouseSample(x: 4, y: 8, time: 0.2, baseWidth: penBaseWidth);
     expect(point.pressure, missingPressure);

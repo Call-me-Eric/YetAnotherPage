@@ -141,6 +141,46 @@ void main() {
     expect(m[13], 15);
   });
 
+  test('mapStroke scales point width with the geometry', () {
+    final stroke = StrokeObject(
+      id: 'w',
+      tool: 'pen',
+      color: penColor,
+      baseWidth: 4,
+      finalized: true,
+      points: [
+        StrokePoint(
+          x: 0,
+          y: 0,
+          time: 0,
+          width: 4,
+          height: 4,
+          opacity: 1,
+          pressure: 1,
+        ),
+        StrokePoint(
+          x: 10,
+          y: 0,
+          time: 1,
+          width: 6,
+          height: 6,
+          opacity: 1,
+          pressure: 1,
+        ),
+      ],
+    );
+    final scaled = mapStroke(
+      stroke,
+      (point) => Offset(point.dx * 2, point.dy * 2),
+      widthScale: 2,
+    );
+    expect(scaled.baseWidth, 8);
+    expect(scaled.points.first.x, 0);
+    expect(scaled.points.last.x, 20);
+    expect(scaled.points.first.width, 8);
+    expect(scaled.points.last.width, 12);
+  });
+
   test('rotate matrix spins around the frozen selection center', () {
     const center = Offset(50, 50);
     final matrix = selectionRotateMatrix(

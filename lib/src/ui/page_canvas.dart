@@ -1,3 +1,5 @@
+import '../ink/spatial_index.dart';
+
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -43,13 +45,19 @@ class SelectionPreview {
   const SelectionPreview({
     required this.strokes,
     required this.bounds,
+    this.frameBounds,
     this.outline = const [],
     this.picture,
     this.transform,
   });
 
   final List<StrokeObject> strokes;
+
+  /// Axis-aligned bounds of the transformed sticker (hit-testing / chrome).
   final Rect bounds;
+
+  /// Untransformed frame layout; when set, [transform] moves the frame.
+  final Rect? frameBounds;
   final List<Offset> outline;
   final ui.Picture? picture;
   final Float64List? transform;
@@ -102,6 +110,7 @@ class PageCanvas extends StatelessWidget {
     this.previewPageId,
     this.eraserRadius = 14,
     this.penWidth = 3,
+    this.penColor = 0xFF000000,
     this.lassoPoints = const [],
     this.lassoOutline = const [],
     this.lassoRect,
@@ -164,6 +173,7 @@ class PageCanvas extends StatelessWidget {
   final String? previewPageId;
   final double eraserRadius;
   final double penWidth;
+  final int penColor;
   final List<Offset> lassoPoints;
   final List<Offset> lassoOutline;
   final Rect? lassoRect;
@@ -190,101 +200,147 @@ class PageCanvas extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InteractiveViewer(
-      transformationController: transformation,
-      constrained: false,
-      panEnabled: false,
-      scaleEnabled: true,
-      minScale: 0.2,
-      maxScale: 4,
-      onInteractionEnd: (_) => onScaleSettled?.call(),
-      boundaryMargin: const EdgeInsets.all(800),
-      child: Padding(
-        padding: const EdgeInsets.all(48),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            for (var index = 0; index < pages.length; index++) ...[
-              if (index > 0) const SizedBox(height: pageGap),
-              _PageSheet(
-                page: pages[index],
-                selected: pages[index].id == selectedPageId,
-                preview: pages[index].id == previewPageId ? preview : null,
-                settled: [
-                  for (final item in settledStrokes)
-                    if (item.pageId == pages[index].id) item.stroke,
-                ],
-                live: live,
-                transformation: transformation,
-                onSelect: () => onSelectPage(pages[index].id),
-                onStrokeStart: onStrokeStart,
-                onStrokeMove: onStrokeMove,
-                onStrokeEnd: onStrokeEnd,
-                tool: tool,
-                hiddenIds: hiddenIds,
-                patches: patches,
-                fading: fading,
-                onEraseStart: onEraseStart,
-                onEraseMove: onEraseMove,
-                onEraseEnd: onEraseEnd,
-                textBoxes: [
-                  for (final item in textBoxes)
-                    if (item.pageId == pages[index].id) item.box,
-                ],
-                editingTextId: editingTextId,
-                selectedTextId: selectedTextId,
-                onTextCommit: onTextCommit,
-                onTextDraft: onTextDraft,
-                onTextResize: onTextResize,
-                onTextBlur: onTextBlur,
-                onSuppressPan: onSuppressPan,
-                onTextCreate: onTextCreate,
-                onTextSelect: onTextSelect,
-                onTextEdit: onTextEdit,
-                onTextDelete: onTextDelete,
-                onTextMove: onTextMove,
-                onTextMoveEnd: onTextMoveEnd,
-                onTextHover: onTextHover,
-                onTip: onTip,
-                viewScale: viewScale,
-                eraserRadius: eraserRadius,
-                penWidth: penWidth,
-                lassoPoints: pages[index].id == selectedPageId
-                    ? lassoPoints
-                    : const [],
-                lassoOutline: pages[index].id == selectedPageId
-                    ? lassoOutline
-                    : const [],
-                selectionHaptic: selectionHaptic,
-                lassoRect: pages[index].id == selectedPageId ? lassoRect : null,
-                lassoLive: pages[index].id == selectedPageId
-                    ? lassoLive
-                    : _idleLasso,
-                selectionBounds: pages[index].id == selectedPageId
-                    ? selectionBounds
-                    : null,
-                selectionInk: pages[index].id == selectedPageId
-                    ? selectionInk
-                    : const [],
-                onLassoStart: onLassoStart,
-                onLassoMove: onLassoMove,
-                onLassoEnd: onLassoEnd,
-                onSelectionMove: onSelectionMove,
-                onSelectionMoveEnd: onSelectionMoveEnd,
-                onSelectionScale: onSelectionScale,
-                onSelectionScaleEnd: onSelectionScaleEnd,
-                onSelectionRotate: onSelectionRotate,
-                onSelectionRotateEnd: onSelectionRotateEnd,
-                onSelectionMenu: onSelectionMenu,
-                onSelectionClear: onSelectionClear,
-                selectionLive: pages[index].id == selectedPageId
-                    ? selectionLive
-                    : _idleSelection,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return ValueListenableBuilder<Matrix4>(
+          valueListenable: transformation,
+          builder: (context, matrix, child) {
+            final inverse = Matrix4.tryInvert(matrix);
+            final viewport = inverse == null
+                ? Rect.largest
+                : MatrixUtils.transformRect(
+                    inverse,
+                    Offset.zero & constraints.biggest,
+                  ).inflate(128);
+            var pageTop = 48.0;
+            final visible = <bool>[];
+            final visibleRects = <Rect>[];
+            for (final page in pages) {
+              visible.add(
+                viewport.overlaps(
+                  Rect.fromLTWH(48, pageTop, page.width, page.height),
+                ),
+              );
+              visibleRects.add(
+                viewport
+                    .intersect(
+                      Rect.fromLTWH(48, pageTop, page.width, page.height),
+                    )
+                    .shift(Offset(-48, -pageTop)),
+              );
+              pageTop += page.height + pageGap;
+            }
+            return InteractiveViewer(
+              transformationController: transformation,
+              constrained: false,
+              panEnabled: false,
+              scaleEnabled: true,
+              minScale: 0.2,
+              maxScale: 4,
+              onInteractionEnd: (_) => onScaleSettled?.call(),
+              boundaryMargin: const EdgeInsets.all(800),
+              child: Padding(
+                padding: const EdgeInsets.all(48),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (var index = 0; index < pages.length; index++) ...[
+                      if (index > 0) const SizedBox(height: pageGap),
+                      if (!visible[index])
+                        SizedBox(
+                          width: pages[index].width,
+                          height: pages[index].height,
+                        )
+                      else
+                        _PageSheet(
+                          page: pages[index],
+                          visibleBounds: visibleRects[index],
+                          selected: pages[index].id == selectedPageId,
+                          preview: pages[index].id == previewPageId
+                              ? preview
+                              : null,
+                          settled: [
+                            for (final item in settledStrokes)
+                              if (item.pageId == pages[index].id) item.stroke,
+                          ],
+                          live: live,
+                          transformation: transformation,
+                          onSelect: () => onSelectPage(pages[index].id),
+                          onStrokeStart: onStrokeStart,
+                          onStrokeMove: onStrokeMove,
+                          onStrokeEnd: onStrokeEnd,
+                          tool: tool,
+                          hiddenIds: hiddenIds,
+                          patches: patches,
+                          fading: fading,
+                          onEraseStart: onEraseStart,
+                          onEraseMove: onEraseMove,
+                          onEraseEnd: onEraseEnd,
+                          textBoxes: [
+                            for (final item in textBoxes)
+                              if (item.pageId == pages[index].id) item.box,
+                          ],
+                          editingTextId: editingTextId,
+                          selectedTextId: selectedTextId,
+                          onTextCommit: onTextCommit,
+                          onTextDraft: onTextDraft,
+                          onTextResize: onTextResize,
+                          onTextBlur: onTextBlur,
+                          onSuppressPan: onSuppressPan,
+                          onTextCreate: onTextCreate,
+                          onTextSelect: onTextSelect,
+                          onTextEdit: onTextEdit,
+                          onTextDelete: onTextDelete,
+                          onTextMove: onTextMove,
+                          onTextMoveEnd: onTextMoveEnd,
+                          onTextHover: onTextHover,
+                          onTip: onTip,
+                          viewScale: viewScale,
+                          eraserRadius: eraserRadius,
+                          penWidth: penWidth,
+                          penColor: penColor,
+                          lassoPoints: pages[index].id == selectedPageId
+                              ? lassoPoints
+                              : const [],
+                          lassoOutline: pages[index].id == selectedPageId
+                              ? lassoOutline
+                              : const [],
+                          selectionHaptic: selectionHaptic,
+                          lassoRect: pages[index].id == selectedPageId
+                              ? lassoRect
+                              : null,
+                          lassoLive: pages[index].id == selectedPageId
+                              ? lassoLive
+                              : _idleLasso,
+                          selectionBounds: pages[index].id == selectedPageId
+                              ? selectionBounds
+                              : null,
+                          selectionInk: pages[index].id == selectedPageId
+                              ? selectionInk
+                              : const [],
+                          onLassoStart: onLassoStart,
+                          onLassoMove: onLassoMove,
+                          onLassoEnd: onLassoEnd,
+                          onSelectionMove: onSelectionMove,
+                          onSelectionMoveEnd: onSelectionMoveEnd,
+                          onSelectionScale: onSelectionScale,
+                          onSelectionScaleEnd: onSelectionScaleEnd,
+                          onSelectionRotate: onSelectionRotate,
+                          onSelectionRotateEnd: onSelectionRotateEnd,
+                          onSelectionMenu: onSelectionMenu,
+                          onSelectionClear: onSelectionClear,
+                          selectionLive: pages[index].id == selectedPageId
+                              ? selectionLive
+                              : _idleSelection,
+                        ),
+                    ],
+                  ],
+                ),
               ),
-            ],
-          ],
-        ),
-      ),
+            );
+          },
+        );
+      },
     );
   }
 }
@@ -292,6 +348,7 @@ class PageCanvas extends StatelessWidget {
 class _PageSheet extends StatefulWidget {
   const _PageSheet({
     required this.page,
+    required this.visibleBounds,
     required this.selected,
     required this.preview,
     required this.settled,
@@ -327,6 +384,7 @@ class _PageSheet extends StatefulWidget {
     this.viewScale = 1,
     this.eraserRadius = 14,
     this.penWidth = 3,
+    this.penColor = 0xFF000000,
     this.lassoPoints = const [],
     this.lassoOutline = const [],
     this.lassoRect,
@@ -349,6 +407,7 @@ class _PageSheet extends StatefulWidget {
   });
 
   final PageFile page;
+  final Rect visibleBounds;
   final bool selected;
   final StrokeObject? preview;
   final List<StrokeObject> settled;
@@ -385,6 +444,7 @@ class _PageSheet extends StatefulWidget {
   final double viewScale;
   final double eraserRadius;
   final double penWidth;
+  final int penColor;
   final List<Offset> lassoPoints;
   final List<Offset> lassoOutline;
   final Rect? lassoRect;
@@ -501,7 +561,8 @@ class _PageSheetState extends State<_PageSheet> {
           _inkPointer = event.pointer;
           _trackTip(event, pressed: true);
           widget.onSelect();
-          if (widget.tool == InkTool.pen) {
+          if ((widget.tool == InkTool.pen ||
+              widget.tool == InkTool.highlighter)) {
             widget.onStrokeStart(widget.page.id, event);
             return;
           }
@@ -538,7 +599,8 @@ class _PageSheetState extends State<_PageSheet> {
           if (!drawsInk(event.kind) || !_inside(event.localPosition)) {
             return;
           }
-          if (widget.tool == InkTool.pen) {
+          if ((widget.tool == InkTool.pen ||
+              widget.tool == InkTool.highlighter)) {
             widget.onStrokeMove(widget.page.id, event);
             return;
           }
@@ -581,35 +643,10 @@ class _PageSheetState extends State<_PageSheet> {
             child: ClipRect(
               child: Stack(
                 children: [
-                  _CommittedInk(
-                    key: ValueKey('ink-${widget.page.id}'),
-                    pageId: widget.page.id,
-                    width: widget.page.width,
-                    height: widget.page.height,
-                    strokes: committed,
-                    patches: widget.patches,
-                    viewScale: widget.viewScale,
-                  ),
-                  ValueListenableBuilder<
-                    ({String pageId, StrokeObject stroke})?
-                  >(
-                    valueListenable: widget.live,
-                    builder: (context, live, _) {
-                      final stroke =
-                          live != null && live.pageId == widget.page.id
-                          ? live.stroke
-                          : null;
-                      if (stroke == null) {
-                        return const SizedBox.shrink();
-                      }
-                      return _LiveInk(
-                        key: ValueKey('live-${widget.page.id}-${stroke.id}'),
-                        stroke: stroke,
-                        width: widget.page.width,
-                        height: widget.page.height,
-                        viewScale: widget.viewScale,
-                      );
-                    },
+                  ValueListenableBuilder<StrokeFade>(
+                    valueListenable: widget.fading,
+                    builder: (context, fade, _) =>
+                        _orderedContent(committed, fade),
                   ),
                   Align(
                     alignment: Alignment.bottomLeft,
@@ -620,19 +657,6 @@ class _PageSheetState extends State<_PageSheet> {
                         style: TextStyle(color: color.outline, fontSize: 12),
                       ),
                     ),
-                  ),
-                  ValueListenableBuilder<StrokeFade>(
-                    valueListenable: widget.fading,
-                    builder: (context, fade, _) {
-                      if (fade.pageId != widget.page.id ||
-                          fade.strokes.isEmpty) {
-                        return const SizedBox.shrink();
-                      }
-                      return CustomPaint(
-                        painter: _FadePainter(fade.strokes, solid: fade.solid),
-                        size: Size(widget.page.width, widget.page.height),
-                      );
-                    },
                   ),
                   if (_rubber != null &&
                       _rubber!.width > 0 &&
@@ -665,7 +689,8 @@ class _PageSheetState extends State<_PageSheet> {
                       builder: (context, drag, _) {
                         final points = drag?.points ?? const <Offset>[];
                         final rect = drag?.rect;
-                        if (points.length < 2 && (rect == null || rect.isEmpty)) {
+                        if (points.length < 2 &&
+                            (rect == null || rect.isEmpty)) {
                           return const SizedBox.shrink();
                         }
                         return IgnorePointer(
@@ -686,61 +711,97 @@ class _PageSheetState extends State<_PageSheet> {
                             ink.isNotEmpty ||
                             outline.length >= 2 ||
                             live?.picture != null;
-                        if (!hasMark) {
+                        final frameBounds =
+                            live?.frameBounds ??
+                            live?.bounds ??
+                            widget.selectionBounds;
+                        if (!hasMark && frameBounds == null) {
                           return const SizedBox.shrink();
                         }
-                        return IgnorePointer(
-                          child: CustomPaint(
-                            painter: _SelectionMarkPainter(
-                              strokes: ink,
-                              outline: outline,
-                              picture: live?.picture,
-                              transform: live?.transform,
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                  Positioned.fill(
-                    child: TextBoxLayer(
-                      boxes: widget.textBoxes,
-                      pageWidth: widget.page.width,
-                      editingId: widget.editingTextId,
-                      selectedId: widget.selectedTextId,
-                      interactive: widget.tool == InkTool.text,
-                      onCommit: widget.onTextCommit,
-                      onDraft: widget.onTextDraft,
-                      onResize: widget.onTextResize,
-                      onEdit: (box) =>
-                          widget.onTextEdit(widget.page.id, box.id),
-                      onDelete: (box) =>
-                          widget.onTextDelete(widget.page.id, box.id),
-                      onResizeDown: widget.onSuppressPan,
-                    ),
-                  ),
-                  Positioned.fill(
-                    child: ValueListenableBuilder<SelectionPreview?>(
-                      valueListenable: widget.selectionLive,
-                      builder: (context, live, _) {
-                        final bounds = live?.bounds ?? widget.selectionBounds;
-                        if (bounds == null) {
-                          return const SizedBox.shrink();
-                        }
-                        return SelectionFrame(
-                          key: const ValueKey('selection-frame'),
-                          bounds: bounds,
-                          onMove: (point) =>
-                              widget.onSelectionMove?.call(point),
-                          onMoveEnd: () => widget.onSelectionMoveEnd?.call(),
-                          onScale: (handle, point) =>
-                              widget.onSelectionScale?.call(handle, point),
-                          onScaleEnd: () => widget.onSelectionScaleEnd?.call(),
-                          onRotate: (point) =>
-                              widget.onSelectionRotate?.call(point),
-                          onRotateEnd: () =>
-                              widget.onSelectionRotateEnd?.call(),
-                          onMenu: () => widget.onSelectionMenu?.call(),
+                        final storage = live?.transform;
+                        final matrix = storage == null
+                            ? Matrix4.identity()
+                            : Matrix4.fromFloat64List(storage);
+                        final pageBox =
+                            context.findRenderObject() as RenderBox?;
+                        Offset toPage(Offset global) =>
+                            pageBox?.globalToLocal(global) ?? global;
+                        // Frame follows rotation/translation; size is laid out
+                        // from scale so chrome (handles/strokes) never scales.
+                        final pose = frameBounds == null
+                            ? null
+                            : _selectionFramePose(matrix, frameBounds);
+                        // Knobs / rotate stem sit outside the rect — pad so
+                        // hit-testing is not clipped by the Positioned box.
+                        const knobPad = 20.0;
+                        final framePad = pose == null
+                            ? 0.0
+                            : 16 +
+                                  math.min(pose.width, pose.height) * 0.12 +
+                                  knobPad;
+                        return Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            if (hasMark)
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: CustomPaint(
+                                    painter: _SelectionMarkPainter(
+                                      strokes: ink,
+                                      outline: outline,
+                                      picture: live?.picture,
+                                      transform: storage,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            if (pose != null)
+                              Positioned(
+                                left:
+                                    pose.center.dx - pose.width / 2 - framePad,
+                                top:
+                                    pose.center.dy - pose.height / 2 - framePad,
+                                width: pose.width + framePad * 2,
+                                height: pose.height + framePad * 2,
+                                child: Transform.rotate(
+                                  angle: pose.angle,
+                                  alignment: Alignment.center,
+                                  filterQuality: FilterQuality.low,
+                                  child: SelectionFrame(
+                                    key: const ValueKey('selection-frame'),
+                                    bounds: Rect.fromLTWH(
+                                      framePad,
+                                      framePad,
+                                      pose.width,
+                                      pose.height,
+                                    ),
+                                    toPage: toPage,
+                                    onMoveStart: (point) =>
+                                        widget.onSelectionMove?.call(point),
+                                    onMove: (point) =>
+                                        widget.onSelectionMove?.call(point),
+                                    onMoveEnd: () =>
+                                        widget.onSelectionMoveEnd?.call(),
+                                    onScaleStart: (handle, point) => widget
+                                        .onSelectionScale
+                                        ?.call(handle, point),
+                                    onScale: (handle, point) => widget
+                                        .onSelectionScale
+                                        ?.call(handle, point),
+                                    onScaleEnd: () =>
+                                        widget.onSelectionScaleEnd?.call(),
+                                    onRotateStart: (point) =>
+                                        widget.onSelectionRotate?.call(point),
+                                    onRotate: (point) =>
+                                        widget.onSelectionRotate?.call(point),
+                                    onRotateEnd: () =>
+                                        widget.onSelectionRotateEnd?.call(),
+                                    onMenu: () =>
+                                        widget.onSelectionMenu?.call(),
+                                  ),
+                                ),
+                              ),
+                          ],
                         );
                       },
                     ),
@@ -767,11 +828,14 @@ class _PageSheetState extends State<_PageSheet> {
                         child: IgnorePointer(
                           child: RepaintBoundary(
                             child: CustomPaint(
+                              key: const ValueKey('ink-tip'),
                               painter: _TipPainter(
                                 Offset(radius + pad, radius + pad),
                                 eraser: eraser,
                                 radius: radius,
                                 opaque: _tipDown,
+                                color: Color(widget.penColor),
+                                highlighter: widget.tool == InkTool.highlighter,
                               ),
                               size: Size(side, side),
                             ),
@@ -970,7 +1034,7 @@ class _PageSheetState extends State<_PageSheet> {
 
   void _finishPointer(int pointer, PointerDeviceKind kind) {
     if (drawsInk(kind)) {
-      if (widget.tool == InkTool.pen) {
+      if ((widget.tool == InkTool.pen || widget.tool == InkTool.highlighter)) {
         widget.onStrokeEnd(widget.page.id);
       } else {
         widget.onEraseEnd(widget.page.id);
@@ -1006,6 +1070,106 @@ class _PageSheetState extends State<_PageSheet> {
     return (point - knob).distance <= 22;
   }
 
+  Widget _orderedContent(List<StrokeObject> committed, StrokeFade fade) {
+    final ink = {for (final stroke in committed) stroke.id: stroke};
+    final texts = {for (final box in widget.textBoxes) box.id: box};
+    final faded = fade.pageId == widget.page.id && !fade.solid
+        ? fade.strokes.map((stroke) => stroke.id).toSet()
+        : <String>{};
+    final children = <Widget>[];
+    final shownTexts = <String>{};
+    final writable = widget.page.layers.reversed.where(
+      (layer) => layer.visible && !layer.locked,
+    );
+    final liveLayer = writable.isEmpty ? null : writable.first.id;
+    Widget text(TextBox box) => Positioned.fill(
+      key: ValueKey('text-${box.id}'),
+      child: TextBoxLayer(
+        boxes: [box],
+        pageWidth: widget.page.width,
+        editingId: widget.editingTextId,
+        selectedId: widget.selectedTextId,
+        interactive: widget.tool == InkTool.text,
+        onCommit: widget.onTextCommit,
+        onDraft: widget.onTextDraft,
+        onResize: widget.onTextResize,
+        onEdit: (box) => widget.onTextEdit(widget.page.id, box.id),
+        onDelete: (box) => widget.onTextDelete(widget.page.id, box.id),
+        onResizeDown: widget.onSuppressPan,
+      ),
+    );
+    for (final layer in widget.page.layers) {
+      if (!layer.visible) continue;
+      final deleted = layer.deletedObjectIds.toSet();
+      var run = <StrokeObject>[];
+      var boundary = 'start';
+      void flush() {
+        if (run.isEmpty) return;
+        children.add(
+          _CommittedInk(
+            key: ValueKey('ink-${widget.page.id}-${layer.id}-$boundary'),
+            pageId: widget.page.id,
+            width: widget.page.width,
+            height: widget.page.height,
+            strokes: run,
+            patches: widget.patches,
+            viewScale: widget.viewScale,
+            fadedIds: faded,
+            visibleBounds: widget.visibleBounds,
+          ),
+        );
+        run = [];
+      }
+
+      for (final object in layer.objects) {
+        if (object is! Map || deleted.contains(object['id'])) {
+          continue;
+        }
+        final stroke = ink[object['id']];
+        if (stroke != null) {
+          run.add(stroke);
+          continue;
+        }
+        final box = texts[object['id']];
+        if (box != null) {
+          flush();
+          children.add(text(box));
+          shownTexts.add(box.id);
+          boundary = box.id;
+        }
+      }
+      flush();
+      if (layer.id == liveLayer) {
+        children.add(
+          ValueListenableBuilder<({String pageId, StrokeObject stroke})?>(
+            valueListenable: widget.live,
+            builder: (context, live, _) {
+              if (live == null || live.pageId != widget.page.id) {
+                return const SizedBox.shrink();
+              }
+              return _LiveInk(
+                key: ValueKey('live-${widget.page.id}-${live.stroke.id}'),
+                stroke: live.stroke,
+                width: widget.page.width,
+                height: widget.page.height,
+                viewScale: widget.viewScale,
+              );
+            },
+          ),
+        );
+      }
+    }
+    // Clipboard text is a draft until its selection is committed.
+    for (final box in texts.values) {
+      if (!shownTexts.contains(box.id)) children.add(text(box));
+    }
+    return SizedBox(
+      width: widget.page.width,
+      height: widget.page.height,
+      child: Stack(children: children),
+    );
+  }
+
   bool _inside(Offset point) {
     return point.dx >= 0 &&
         point.dy >= 0 &&
@@ -1015,6 +1179,7 @@ class _PageSheetState extends State<_PageSheet> {
 
   List<StrokeObject> _committedInk() {
     final found = <StrokeObject>[];
+    final deleted = _deleted;
     final seen = <String>{};
     for (final layer in widget.page.layers) {
       if (!layer.visible) {
@@ -1031,11 +1196,11 @@ class _PageSheetState extends State<_PageSheet> {
         }
         if (id == widget.preview?.id ||
             widget.hiddenIds.contains(id) ||
-            _deleted.contains(id)) {
+            deleted.contains(id)) {
           continue;
         }
         seen.add(id);
-        final cached = _finalStrokes[id];
+        final cached = _finalStrokes[id] ?? layer.strokeCache[id];
         if (cached != null) {
           found.add(cached);
           continue;
@@ -1056,7 +1221,7 @@ class _PageSheetState extends State<_PageSheet> {
         if (!ids.contains(item.id) &&
             item.id != widget.preview?.id &&
             !widget.hiddenIds.contains(item.id) &&
-            !_deleted.contains(item.id))
+            !deleted.contains(item.id))
           item,
     ];
   }
@@ -1093,14 +1258,14 @@ class _SelectionMarkPainter extends CustomPainter {
       for (final stroke in strokes) {
         paintStroke(canvas, stroke);
       }
-      if (outline.length >= 2) {
-        final path = Path()..moveTo(outline.first.dx, outline.first.dy);
-        for (final point in outline.skip(1)) {
-          path.lineTo(point.dx, point.dy);
-        }
-        path.close();
-        _drawDashed(canvas, path, _selectionBlue);
+    }
+    if (outline.length >= 2) {
+      final path = Path()..moveTo(outline.first.dx, outline.first.dy);
+      for (final point in outline.skip(1)) {
+        path.lineTo(point.dx, point.dy);
       }
+      path.close();
+      _drawDashed(canvas, path, _selectionOutline);
     }
     if (matrix != null) {
       canvas.restore();
@@ -1115,12 +1280,34 @@ class _SelectionMarkPainter extends CustomPainter {
       oldDelegate.outline != outline;
 }
 
+({Offset center, double angle, double width, double height})
+_selectionFramePose(Matrix4 matrix, Rect origin) {
+  final m = matrix.storage;
+  final scaleX = Offset(m[0], m[1]).distance;
+  final scaleY = Offset(m[4], m[5]).distance;
+  final scale = (scaleX < 1e-6 || scaleY < 1e-6)
+      ? 1.0
+      : math.sqrt(scaleX * scaleY).clamp(0.2, 8.0);
+  final angle = math.atan2(m[1], m[0]);
+  final center = Offset(
+    m[0] * origin.center.dx + m[4] * origin.center.dy + m[12],
+    m[1] * origin.center.dx + m[5] * origin.center.dy + m[13],
+  );
+  return (
+    center: center,
+    angle: angle,
+    width: math.max(origin.width * scale, 1),
+    height: math.max(origin.height * scale, 1),
+  );
+}
+
 bool _stylusKind(PointerDeviceKind kind) {
   return kind == PointerDeviceKind.stylus ||
       kind == PointerDeviceKind.invertedStylus;
 }
 
 const _selectionBlue = Color(0xFF3D7EFF);
+const _selectionOutline = Color(0x733D7EFF);
 
 void _drawDashed(Canvas canvas, Path source, Color color) {
   final paint = Paint()
@@ -1167,12 +1354,16 @@ class _TipPainter extends CustomPainter {
     required this.eraser,
     required this.radius,
     required this.opaque,
+    required this.color,
+    required this.highlighter,
   });
 
   final Offset center;
   final bool eraser;
   final double radius;
   final bool opaque;
+  final Color color;
+  final bool highlighter;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1196,7 +1387,10 @@ class _TipPainter extends CustomPainter {
     canvas.drawCircle(
       center,
       radius,
-      Paint()..color = const Color(0xFF222222),
+      Paint()
+        ..color = highlighter
+            ? color.withValues(alpha: highlighterOpacity)
+            : color,
     );
   }
 
@@ -1204,40 +1398,10 @@ class _TipPainter extends CustomPainter {
   bool shouldRepaint(covariant _TipPainter oldDelegate) =>
       oldDelegate.center != center ||
       oldDelegate.opaque != opaque ||
-      oldDelegate.radius != radius;
-}
-
-class _FadePainter extends CustomPainter {
-  const _FadePainter(this.strokes, {required this.solid});
-
-  final List<StrokeObject> strokes;
-  final bool solid;
-
-  /// Extra width so the wash covers the ink's antialiased edge, not only its center.
-  static const _pad = 2.0;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final filter = Paint()
-      ..colorFilter = ColorFilter.mode(
-        solid ? const Color(0xFFFFFFFF) : const Color(0x99FFFFFF),
-        BlendMode.modulate,
-      );
-    final cover = Paint()..color = const Color(0xFFFFFFFF);
-    for (final stroke in strokes) {
-      final bounds = _inkBounds(stroke.points).inflate(_pad + 1);
-      if (bounds.isEmpty) {
-        continue;
-      }
-      canvas.saveLayer(bounds, filter);
-      paintStrokeCover(canvas, stroke, cover, pad: _pad);
-      canvas.restore();
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _FadePainter oldDelegate) =>
-      oldDelegate.solid != solid || oldDelegate.strokes != strokes;
+      oldDelegate.radius != radius ||
+      oldDelegate.eraser != eraser ||
+      oldDelegate.color != color ||
+      oldDelegate.highlighter != highlighter;
 }
 
 class _CommittedInk extends StatefulWidget {
@@ -1248,9 +1412,13 @@ class _CommittedInk extends StatefulWidget {
     required this.strokes,
     required this.patches,
     this.viewScale = 1,
+    this.fadedIds = const {},
+    this.visibleBounds,
     super.key,
   });
 
+  final Set<String> fadedIds;
+  final Rect? visibleBounds;
   final String pageId;
   final double width;
   final double height;
@@ -1266,11 +1434,18 @@ class _CommittedInkState extends State<_CommittedInk> {
   static const _tileSize = 256.0;
 
   final Map<String, ui.Image> _tiles = {};
-  final Set<String> _rasterized = {};
   var _chain = Future<void>.value();
   var _generation = 0;
-  var _dabbed = false;
-  final Set<String> _baked = {};
+  final Map<String, StrokeObject> _sources = {};
+  final Map<String, Rect> _dirtyTiles = {};
+  final Map<String, Rect> _damage = {};
+  Set<String> _previousFade = const {};
+  final Map<String, Rect> _bounds = {};
+  final Map<String, ui.Picture> _pictures = {};
+  final StrokeSpatialIndex _index = StrokeSpatialIndex();
+  Set<String> _requestedTiles = const {};
+  Rect get _visible =>
+      widget.visibleBounds ?? Rect.fromLTWH(0, 0, widget.width, widget.height);
   double _dpr = 1;
 
   @override
@@ -1299,9 +1474,11 @@ class _CommittedInkState extends State<_CommittedInk> {
 
   void _dropTiles() {
     _generation++;
-    _rasterized.clear();
-    _baked.clear();
-    _dabbed = false;
+    _sources.clear();
+    _previousFade = const {};
+    _dirtyTiles.clear();
+    _damage.clear();
+    _requestedTiles = const {};
     final retiring = List<ui.Image>.of(_tiles.values);
     _tiles.clear();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1318,41 +1495,63 @@ class _CommittedInkState extends State<_CommittedInk> {
     for (final image in _tiles.values) {
       image.dispose();
     }
+    for (final picture in _pictures.values) {
+      picture.dispose();
+    }
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     _syncStrokes(widget.strokes);
-    final pending = [
-      for (final stroke in widget.strokes)
-        if (!_baked.contains(stroke.id)) stroke,
+    final dirty = [
+      for (final entry in _damage.entries)
+        if (entry.value.overlaps(_visible)) entry.value,
     ];
+    final pending = _index.queryRects(dirty);
     return SizedBox(
       width: widget.width,
       height: widget.height,
       child: Stack(
         children: [
           for (final entry in _tiles.entries)
-            Positioned(
-              key: ValueKey(entry.key),
-              left: _left(entry.key),
-              top: _top(entry.key),
-              width: _tileWidth(_left(entry.key)),
-              height: _tileHeight(_top(entry.key)),
-              child: RepaintBoundary(
-                child: CustomPaint(
-                  painter: _TilePainter(entry.value),
-                  size: Size(
-                    _tileWidth(_left(entry.key)),
-                    _tileHeight(_top(entry.key)),
+            if (Rect.fromLTWH(
+              _left(entry.key),
+              _top(entry.key),
+              _tileWidth(_left(entry.key)),
+              _tileHeight(_top(entry.key)),
+            ).overlaps(_visible))
+              Positioned(
+                key: ValueKey(entry.key),
+                left: _left(entry.key),
+                top: _top(entry.key),
+                width: _tileWidth(_left(entry.key)),
+                height: _tileHeight(_top(entry.key)),
+                child: RepaintBoundary(
+                  child: CustomPaint(
+                    painter: _TilePainter(
+                      entry.value,
+                      exclude: _damage[entry.key]?.shift(
+                        Offset(-_left(entry.key), -_top(entry.key)),
+                      ),
+                    ),
+                    size: Size(
+                      _tileWidth(_left(entry.key)),
+                      _tileHeight(_top(entry.key)),
+                    ),
                   ),
                 ),
               ),
-            ),
           if (pending.isNotEmpty)
             Positioned.fill(
-              child: CustomPaint(painter: _VectorInkPainter(pending)),
+              child: CustomPaint(
+                painter: _VectorInkPainter(
+                  pending,
+                  clipRects: dirty,
+                  pictures: _pictures,
+                  fadedIds: widget.fadedIds,
+                ),
+              ),
             ),
         ],
       ),
@@ -1364,8 +1563,9 @@ class _CommittedInkState extends State<_CommittedInk> {
     if (patch == null || patch.pageId != widget.pageId) {
       return;
     }
-    _dabbed = true;
-    _enqueue(patch.bounds, patch.paint, onApplied: patch.onApplied);
+    // Destructive tile punches are no longer applied. Ink truth is the stroke
+    // list; removals rebuild tiles from vectors in [_syncStrokes].
+    patch.onApplied?.call();
   }
 
   var _paintScheduled = false;
@@ -1384,62 +1584,89 @@ class _CommittedInkState extends State<_CommittedInk> {
   }
 
   void _syncStrokes(List<StrokeObject> strokes) {
-    final ids = {for (final stroke in strokes) stroke.id};
-    final added = [
-      for (final stroke in strokes)
-        if (!_rasterized.contains(stroke.id)) stroke,
+    final next = {for (final stroke in strokes) stroke.id: stroke};
+    final changed = <StrokeObject>[
+      for (final entry in _sources.entries)
+        if (!next.containsKey(entry.key)) entry.value,
+      for (final entry in next.entries)
+        if (!_sources.containsKey(entry.key)) entry.value,
     ];
-    final removed = _rasterized.difference(ids);
-    if (removed.isEmpty && added.isEmpty) {
-      return;
-    }
-    if (_dabbed && removed.isNotEmpty && added.isEmpty) {
-      _rasterized.removeAll(removed);
-      _baked.removeAll(removed);
-      _dabbed = false;
-      return;
-    }
-    if (removed.isNotEmpty || added.length > 1) {
-      _rasterized
-        ..clear()
-        ..addAll(ids);
-      _baked
-        ..clear()
-        ..addAll(ids);
-      _generation++;
-      _repaintTiles(strokes, _generation);
-      return;
-    }
-    for (final stroke in added) {
-      _rasterized.add(stroke.id);
-      final bounds = _inkBounds(stroke.points).inflate(stroke.baseWidth + 2);
-      _enqueue(
-        bounds,
-        (canvas) => paintStroke(canvas, stroke),
-        bakeIds: [stroke.id],
-      );
-    }
-  }
-
-  void _repaintTiles(List<StrokeObject> strokes, int generation) {
-    _chain = _chain.then((_) async {
-      if (!mounted || generation != _generation) {
-        return;
-      }
-      final rects = <Rect>[];
-      final seen = <String>{};
-      for (final stroke in strokes) {
-        if (stroke.points.isEmpty) {
-          continue;
-        }
-        final bounds = _inkBounds(stroke.points).inflate(stroke.baseWidth + 2);
+    final opacityChanges = _previousFade
+        .difference(widget.fadedIds)
+        .union(widget.fadedIds.difference(_previousFade));
+    changed.addAll(
+      strokes.where((stroke) => opacityChanges.contains(stroke.id)),
+    );
+    _previousFade = Set.of(widget.fadedIds);
+    final beforeOrder = _sources.keys.where(next.containsKey).toList();
+    final afterOrder = next.keys.where(_sources.containsKey).toList();
+    if (!listEquals(beforeOrder, afterOrder)) changed.addAll(strokes);
+    if (changed.isNotEmpty) {
+      for (final stroke in changed) {
+        final bounds = _bounds.putIfAbsent(
+          stroke.id,
+          () => _inkBounds(stroke.points).inflate(stroke.baseWidth + 2),
+        );
         for (final rect in _tileRects(bounds)) {
           final key = _tileKey(rect);
-          if (seen.add(key)) {
-            rects.add(rect);
-          }
+          _dirtyTiles[key] = rect;
+          final damage = bounds.intersect(rect);
+          _damage[key] = _damage[key]?.expandToInclude(damage) ?? damage;
         }
       }
+      for (final id in _pictures.keys.toList()) {
+        if (next.containsKey(id)) continue;
+        final picture = _pictures.remove(id)!;
+        WidgetsBinding.instance.addPostFrameCallback((_) => picture.dispose());
+      }
+      _index.sync(strokes);
+      _sources
+        ..clear()
+        ..addAll(next);
+      _bounds.removeWhere((id, _) => !next.containsKey(id));
+    } // geometry/ordering changes
+    for (final rect in _tileRects(_visible)) {
+      final key = _tileKey(rect);
+      if (!_tiles.containsKey(key) &&
+          !_dirtyTiles.containsKey(key) &&
+          _index.query(rect).isNotEmpty) {
+        _dirtyTiles[key] = rect;
+        _damage[key] = rect;
+      }
+    }
+    final rects = _dirtyTiles.values
+        .where((rect) => rect.overlaps(_visible))
+        .toList();
+    final keys = rects.map(_tileKey).toSet();
+    if (keys.isEmpty || (changed.isEmpty && setEquals(keys, _requestedTiles))) {
+      return;
+    }
+    _requestedTiles = keys;
+    for (final stroke in _index.queryRects(rects)) {
+      _pictures.putIfAbsent(stroke.id, () {
+        final recorder = ui.PictureRecorder();
+        paintStroke(Canvas(recorder), stroke);
+        return recorder.endRecording();
+      });
+    }
+    final generation = ++_generation;
+    _repaintTiles(strokes, generation, rects);
+  }
+
+  // Only changed tiles are reconstructed from live objects. Untouched tiles
+  // remain cached; pending areas show the same vectors until images are ready.
+  void _repaintTiles(
+    List<StrokeObject> strokes,
+    int generation,
+    List<Rect> rects,
+  ) {
+    final damage = Map<String, Rect>.of(_damage);
+    final faded = Set.of(widget.fadedIds);
+    final bounds = {
+      for (final stroke in strokes) stroke.id: _bounds[stroke.id]!,
+    };
+    _chain = _chain.then((_) async {
+      if (!mounted || generation != _generation) return;
       final updates = <String, ui.Image>{};
       for (final rect in rects) {
         if (!mounted || generation != _generation) {
@@ -1449,18 +1676,20 @@ class _CommittedInkState extends State<_CommittedInk> {
           return;
         }
         final image = await _renderTile(rect, (canvas) {
-          for (final stroke in strokes) {
-            if (stroke.points.isEmpty) {
-              continue;
-            }
-            final bounds = _inkBounds(
-              stroke.points,
-            ).inflate(stroke.baseWidth + 2);
-            if (bounds.overlaps(rect)) {
-              paintStroke(canvas, stroke);
+          final changed = damage[_tileKey(rect)]!;
+          canvas.clipRect(changed, doAntiAlias: false);
+          canvas.drawColor(const Color(0x00000000), BlendMode.clear);
+          for (final stroke in _index.query(changed)) {
+            if (bounds[stroke.id]!.overlaps(changed)) {
+              _drawFrozenStroke(
+                canvas,
+                stroke,
+                _pictures[stroke.id]!,
+                faded: faded.contains(stroke.id),
+              );
             }
           }
-        }, fresh: true);
+        });
         if (!mounted || generation != _generation) {
           image.dispose();
           for (final previous in updates.values) {
@@ -1470,93 +1699,49 @@ class _CommittedInkState extends State<_CommittedInk> {
         }
         updates[_tileKey(rect)] = image;
       }
-      if (!mounted || generation != _generation) {
-        for (final image in updates.values) {
-          image.dispose();
-        }
-        return;
-      }
-      final retiring = <ui.Image>[];
-      final nextKeys = updates.keys.toSet();
-      for (final entry in _tiles.entries) {
-        if (!nextKeys.contains(entry.key)) {
-          retiring.add(entry.value);
-        }
-      }
-      for (final key in _tiles.keys.toList()) {
-        if (!nextKeys.contains(key)) {
-          _tiles.remove(key);
-        }
-      }
+      // Publish images and remove vector fallback together in one frame.
       for (final entry in updates.entries) {
         final previous = _tiles[entry.key];
         _tiles[entry.key] = entry.value;
         if (previous != null) {
-          retiring.add(previous);
+          WidgetsBinding.instance.addPostFrameCallback(
+            (_) => previous.dispose(),
+          );
         }
+        _dirtyTiles.remove(entry.key);
+        _damage.remove(entry.key);
+      }
+      _requestedTiles = const {};
+      _trimTileCache();
+      final keep = _visible.inflate(256);
+      for (final id in _pictures.keys.toList()) {
+        if (_bounds[id]?.overlaps(keep) ?? false) continue;
+        final picture = _pictures.remove(id)!;
+        WidgetsBinding.instance.addPostFrameCallback((_) => picture.dispose());
       }
       _schedulePaint();
-      for (final image in retiring) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => image.dispose());
-      }
     });
   }
 
-  void _enqueue(
-    Rect bounds,
-    void Function(Canvas canvas) paint, {
-    List<String> bakeIds = const [],
-    VoidCallback? onApplied,
-  }) {
-    final generation = _generation;
-    final tiles = _tileRects(bounds);
-    _chain = _chain.then((_) async {
-      if (!mounted || generation != _generation) {
-        if (!mounted) {
-          onApplied?.call();
-        }
-        return;
-      }
-      final updates = <String, ui.Image>{};
-      for (final rect in tiles) {
-        final next = await _renderTile(rect, paint);
-        if (!mounted || generation != _generation) {
-          next.dispose();
-          for (final image in updates.values) {
-            image.dispose();
-          }
-          if (!mounted) {
-            onApplied?.call();
-          }
-          return;
-        }
-        final replaced = updates[_tileKey(rect)];
-        if (replaced != null) {
-          replaced.dispose();
-        }
-        updates[_tileKey(rect)] = next;
-      }
-      if (!mounted || generation != _generation) {
-        for (final image in updates.values) {
-          image.dispose();
-        }
-        return;
-      }
-      final retiring = <ui.Image>[];
-      for (final entry in updates.entries) {
-        final previous = _tiles[entry.key];
-        _tiles[entry.key] = entry.value;
-        if (previous != null) {
-          retiring.add(previous);
-        }
-      }
-      _baked.addAll(bakeIds);
-      onApplied?.call();
-      _schedulePaint();
-      for (final image in retiring) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => image.dispose());
-      }
-    });
+  void _trimTileCache() {
+    const budget = 64 * 1024 * 1024;
+    var bytes = _tiles.values.fold<int>(
+      0,
+      (sum, image) => sum + image.width * image.height * 4,
+    );
+    for (final key in _tiles.keys.toList()) {
+      if (bytes <= budget) break;
+      final rect = Rect.fromLTWH(
+        _left(key),
+        _top(key),
+        _tileWidth(_left(key)),
+        _tileHeight(_top(key)),
+      );
+      if (rect.overlaps(_visible)) continue;
+      final image = _tiles.remove(key)!;
+      bytes -= image.width * image.height * 4;
+      WidgetsBinding.instance.addPostFrameCallback((_) => image.dispose());
+    }
   }
 
   Future<ui.Image> _renderTile(
@@ -1631,8 +1816,37 @@ class _CommittedInkState extends State<_CommittedInk> {
   double _tileHeight(double top) => math.min(_tileSize, widget.height - top);
 }
 
+void _drawFrozenStroke(
+  Canvas canvas,
+  StrokeObject stroke,
+  ui.Picture picture, {
+  required bool faded,
+}) {
+  if (!faded) {
+    canvas.drawPicture(picture);
+    return;
+  }
+  canvas.saveLayer(
+    _inkBounds(stroke.points).inflate(2),
+    Paint()..color = const Color(0x66FFFFFF),
+  );
+  canvas.drawPicture(picture);
+  canvas.restore();
+}
+
 class _VectorInkPainter extends CustomPainter {
-  const _VectorInkPainter(this.strokes);
+  const _VectorInkPainter(
+    this.strokes, {
+    this.clipRects,
+    this.pictures,
+    this.fadedIds = const {},
+  });
+
+  final Set<String> fadedIds;
+
+  final Map<String, ui.Picture>? pictures;
+
+  final List<Rect>? clipRects;
 
   final List<StrokeObject> strokes;
 
@@ -1640,14 +1854,35 @@ class _VectorInkPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     canvas.save();
     canvas.clipRect(Offset.zero & size);
+    if (clipRects != null) {
+      final clip = Path();
+      for (final rect in clipRects!) {
+        clip.addRect(rect);
+      }
+      canvas.clipPath(clip, doAntiAlias: false);
+    }
     for (final stroke in strokes) {
-      paintStroke(canvas, stroke);
+      final picture = pictures?[stroke.id];
+      if (picture != null) {
+        _drawFrozenStroke(
+          canvas,
+          stroke,
+          picture,
+          faded: fadedIds.contains(stroke.id),
+        );
+      } else {
+        paintStroke(canvas, stroke);
+      }
     }
     canvas.restore();
   }
 
   @override
   bool shouldRepaint(covariant _VectorInkPainter oldDelegate) {
+    if (oldDelegate.clipRects != clipRects ||
+        !setEquals(oldDelegate.fadedIds, fadedIds)) {
+      return true;
+    }
     if (oldDelegate.strokes.length != strokes.length) {
       return true;
     }
@@ -1664,23 +1899,34 @@ class _VectorInkPainter extends CustomPainter {
 }
 
 class _TilePainter extends CustomPainter {
-  const _TilePainter(this.image);
+  const _TilePainter(this.image, {this.exclude});
+
+  final Rect? exclude;
 
   final ui.Image image;
 
   @override
   void paint(Canvas canvas, Size size) {
+    canvas.save();
+    if (exclude != null) {
+      final clip = Path()
+        ..fillType = PathFillType.evenOdd
+        ..addRect(Offset.zero & size)
+        ..addRect(exclude!);
+      canvas.clipPath(clip, doAntiAlias: false);
+    }
     canvas.drawImageRect(
       image,
       Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
       Offset.zero & size,
       Paint()..filterQuality = FilterQuality.none,
     );
+    canvas.restore();
   }
 
   @override
   bool shouldRepaint(covariant _TilePainter oldDelegate) =>
-      oldDelegate.image != image;
+      oldDelegate.image != image || oldDelegate.exclude != exclude;
 }
 
 class _LiveInk extends StatefulWidget {
@@ -1706,6 +1952,7 @@ class _LiveInkState extends State<_LiveInk> {
 
   final Map<String, ui.Image> _tiles = {};
   int _imagedUntil = 0;
+  double _imagedDistance = 0;
   double _dpr = 1;
   var _generation = 0;
   var _baking = false;
@@ -1725,6 +1972,7 @@ class _LiveInkState extends State<_LiveInk> {
       final retiring = List<ui.Image>.of(_tiles.values);
       _tiles.clear();
       _imagedUntil = 0;
+      _imagedDistance = 0;
       _baking = false;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         for (final image in retiring) {
@@ -1753,7 +2001,7 @@ class _LiveInkState extends State<_LiveInk> {
         : points.sublist(tailStart);
     final bounds = _inkBounds(tail)
         .intersect(Offset.zero & Size(widget.width, widget.height));
-    return SizedBox(
+    final content = SizedBox(
       width: widget.width,
       height: widget.height,
       child: Stack(
@@ -1784,6 +2032,7 @@ class _LiveInkState extends State<_LiveInk> {
                 painter: _LiveStrokePainter(
                   widget.stroke.copyWith(points: tail),
                   bounds.topLeft,
+                  distanceOffset: _imagedDistance,
                 ),
                 size: bounds.size,
               ),
@@ -1791,6 +2040,9 @@ class _LiveInkState extends State<_LiveInk> {
         ],
       ),
     );
+    return widget.stroke.tool == 'highlighter'
+        ? Opacity(opacity: highlighterOpacity, child: content)
+        : content;
   }
 
   void _scheduleBake(List<StrokePoint> points) {
@@ -1808,7 +2060,7 @@ class _LiveInkState extends State<_LiveInk> {
     final slice = points.sublist(from, until).toList(growable: false);
     final id = widget.stroke.id;
     final tiles = _liveTiles(_inkBounds(slice).inflate(4));
-    _paintTiles(tiles, slice, until, generation, id);
+    _paintTiles(tiles, slice, until, generation, id, _imagedDistance);
   }
 
   Future<void> _paintTiles(
@@ -1817,11 +2069,12 @@ class _LiveInkState extends State<_LiveInk> {
     int until,
     int generation,
     String id,
+    double distanceOffset,
   ) async {
     final updates = <String, ui.Image>{};
     try {
       for (final rect in tiles) {
-        final next = await _renderLiveTile(rect, slice);
+        final next = await _renderLiveTile(rect, slice, distanceOffset);
         if (!mounted || generation != _generation || widget.stroke.id != id) {
           next.dispose();
           for (final image in updates.values) {
@@ -1859,6 +2112,7 @@ class _LiveInkState extends State<_LiveInk> {
     }
     setState(() {
       _imagedUntil = until;
+      _imagedDistance = distanceOffset + strokeLength(slice);
       _baking = false;
     });
     if (retiring.isNotEmpty) {
@@ -1870,7 +2124,11 @@ class _LiveInkState extends State<_LiveInk> {
     }
   }
 
-  Future<ui.Image> _renderLiveTile(Rect rect, List<StrokePoint> slice) {
+  Future<ui.Image> _renderLiveTile(
+    Rect rect,
+    List<StrokePoint> slice,
+    double distanceOffset,
+  ) {
     final scale = (_dpr <= 0 ? 1.0 : _dpr) * widget.viewScale;
     final pixelsWide = math.max(1, (rect.width * scale).round());
     final pixelsHigh = math.max(1, (rect.height * scale).round());
@@ -1894,7 +2152,12 @@ class _LiveInkState extends State<_LiveInk> {
     canvas.scale(pixelsWide / rect.width, pixelsHigh / rect.height);
     canvas.translate(-rect.left, -rect.top);
     canvas.clipRect(rect);
-    paintStroke(canvas, widget.stroke.copyWith(points: slice, finalized: true));
+    paintStroke(
+      canvas,
+      widget.stroke.copyWith(points: slice, finalized: true),
+      distanceOffset: distanceOffset,
+      applyHighlighterOpacity: false,
+    );
     canvas.restore();
     final picture = recorder.endRecording();
     return picture
@@ -1940,6 +2203,7 @@ class _LiveInkState extends State<_LiveInk> {
 }
 
 Rect _inkBounds(List<StrokePoint> points) {
+  if (points is FrozenStrokePoints) return points.inkBounds;
   if (points.isEmpty) {
     return Rect.zero;
   }
@@ -1958,7 +2222,9 @@ Rect _inkBounds(List<StrokePoint> points) {
 }
 
 class _LiveStrokePainter extends CustomPainter {
-  const _LiveStrokePainter(this.stroke, this.origin);
+  const _LiveStrokePainter(this.stroke, this.origin, {this.distanceOffset = 0});
+
+  final double distanceOffset;
 
   final StrokeObject stroke;
   final Offset origin;
@@ -1970,7 +2236,12 @@ class _LiveStrokePainter extends CustomPainter {
     canvas.clipRect(
       Rect.fromLTWH(origin.dx, origin.dy, size.width, size.height),
     );
-    paintStroke(canvas, stroke);
+    paintStroke(
+      canvas,
+      stroke,
+      distanceOffset: distanceOffset,
+      applyHighlighterOpacity: false,
+    );
     canvas.restore();
   }
 
@@ -1978,6 +2249,7 @@ class _LiveStrokePainter extends CustomPainter {
   bool shouldRepaint(covariant _LiveStrokePainter oldDelegate) =>
       oldDelegate.stroke.points.length != stroke.points.length ||
       oldDelegate.origin != origin ||
+      oldDelegate.distanceOffset != distanceOffset ||
       (stroke.points.isNotEmpty &&
           oldDelegate.stroke.points.last != stroke.points.last);
 }

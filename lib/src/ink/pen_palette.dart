@@ -22,7 +22,8 @@ class PenDash {
     if (json is! Map) {
       return PenPalette.solidDash;
     }
-    final cycle = (json['cycle'] as num?)?.toDouble() ?? PenPalette.solidDash.cycle;
+    final cycle =
+        (json['cycle'] as num?)?.toDouble() ?? PenPalette.solidDash.cycle;
     final ratio = (json['ratio'] as num?)?.toDouble() ?? 1;
     return PenDash(
       cycle: cycle.clamp(PenPalette.cycleMin, PenPalette.cycleMax),
@@ -35,7 +36,8 @@ class PenDash {
 ///
 /// The manual leaves the three default widths blank. They are 1.5, 3 and 6,
 /// with 3 selected so a new install matches the previous pen. A new width slot
-/// starts at 3. New colors are white. New dashes are solid.
+/// starts at 3. New colors are white. Default dashes are solid and half-on;
+/// additional dash slots start solid.
 class PenPalette {
   const PenPalette({
     required this.widths,
@@ -55,6 +57,8 @@ class PenPalette {
   static const newWidth = penBaseWidth;
   static const newColor = 0xFFFFFFFF;
   static const solidDash = PenDash(cycle: 24, ratio: 1);
+  static const halfDash = PenDash(cycle: 24, ratio: 0.5);
+  static const defaultDashes = [solidDash, halfDash];
 
   static const defaultWidths = [1.5, 3.0, 6.0];
   static const defaultColors = <int>[
@@ -78,20 +82,32 @@ class PenPalette {
       widthIndex: 1,
       colors: defaultColors,
       colorIndex: 0,
-      dashes: [solidDash],
+      dashes: defaultDashes,
       dashIndex: 0,
     );
   }
+
+  factory PenPalette.highlighter() => const PenPalette(
+    widths: [12, 18, 24],
+    widthIndex: 1,
+    colors: [0xFFFFFF00, 0xFF00FF88, 0xFF55CCFF, 0xFFFF88CC, 0xFFFFAA33],
+    colorIndex: 0,
+    dashes: [solidDash],
+    dashIndex: 0,
+  );
 
   double get width => widths[_index(widthIndex, widths.length)];
   int get color => colors[_index(colorIndex, colors.length)];
   PenDash get dash => dashes[_index(dashIndex, dashes.length)];
 
-  PenPalette selectWidth(int index) => _copy(widthIndex: _index(index, widths.length));
+  PenPalette selectWidth(int index) =>
+      _copy(widthIndex: _index(index, widths.length));
 
-  PenPalette selectColor(int index) => _copy(colorIndex: _index(index, colors.length));
+  PenPalette selectColor(int index) =>
+      _copy(colorIndex: _index(index, colors.length));
 
-  PenPalette selectDash(int index) => _copy(dashIndex: _index(index, dashes.length));
+  PenPalette selectDash(int index) =>
+      _copy(dashIndex: _index(index, dashes.length));
 
   PenPalette updateWidth(int index, double width) {
     final next = [...widths];
@@ -142,15 +158,24 @@ class PenPalette {
     'colorIndex': colorIndex,
     'dashes': [for (final dash in dashes) dash.toJson()],
     'dashIndex': dashIndex,
+    'dashPresetVersion': 1,
   };
 
-  factory PenPalette.fromJson(Object? json) {
+  factory PenPalette.fromJson(Object? json, {bool highlighter = false}) {
     if (json is! Map) {
-      return PenPalette.initial();
+      return highlighter ? PenPalette.highlighter() : PenPalette.initial();
     }
     final widths = _nums(json['widths'], fallback: defaultWidths);
     final colors = _ints(json['colors'], fallback: defaultColors);
-    final dashes = _dashes(json['dashes']);
+    var dashes = _dashes(json['dashes']);
+    // Upgrade the old untouched pen default once; preserve saved custom slots.
+    if (!highlighter &&
+        json['dashPresetVersion'] == null &&
+        dashes.length == 1 &&
+        dashes.single.solid &&
+        dashes.single.cycle == solidDash.cycle) {
+      dashes = defaultDashes;
+    }
     return PenPalette(
       widths: widths,
       widthIndex: _index(_asInt(json['widthIndex']), widths.length),
@@ -161,7 +186,8 @@ class PenPalette {
     );
   }
 
-  static String encode(PenPalette palette) => '${jsonEncode(palette.toJson())}\n';
+  static String encode(PenPalette palette) =>
+      '${jsonEncode(palette.toJson())}\n';
 
   PenPalette _copy({
     List<double>? widths,

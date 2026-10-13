@@ -3,14 +3,13 @@ import 'dart:ui';
 import '../ids.dart';
 import 'stroke.dart';
 
-enum InkTool { pen, text, objectEraser, regionEraser, lasso }
+enum InkTool { pen, highlighter, text, objectEraser, regionEraser, lasso }
 
 enum EraserKind { stroke, region }
 
 enum LassoShape { free, rect }
 
-/// What a lasso is allowed to select. Highlighter objects are not stored yet;
-/// the flag is the interface for when they exist.
+/// Object categories selected independently by either lasso shape.
 enum LassoTarget { stroke, text, highlighter }
 
 const eraserRadius = 14.0;
@@ -21,59 +20,13 @@ bool strokeHitsEraser(
   double radius = eraserRadius,
   Rect? near,
 }) {
-  final points = stroke.points;
-  if (points.isEmpty || eraser.isEmpty) {
-    return false;
-  }
-  for (final point in points) {
-    final pad = point.width / 2;
-    if (near != null &&
-        (point.x + pad < near.left ||
-            point.x - pad > near.right ||
-            point.y + pad < near.top ||
-            point.y - pad > near.bottom)) {
-      continue;
-    }
-    if (_nearEraser(Offset(point.x, point.y), eraser, radius + pad)) {
-      return true;
-    }
-  }
-  for (var index = 0; index < points.length - 1; index++) {
-    final start = points[index];
-    final end = points[index + 1];
-    final pad = (start.width + end.width) / 4;
-    if (near != null && !_spanHits(start.x, start.y, end.x, end.y, near, pad)) {
-      continue;
-    }
-    if (_segmentHitsEraser(
-      Offset(start.x, start.y),
-      Offset(end.x, end.y),
-      eraser,
-      radius + pad,
-    ) &&
-        !end.gap) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool _spanHits(
-  double ax,
-  double ay,
-  double bx,
-  double by,
-  Rect near,
-  double pad,
-) {
-  final left = (ax < bx ? ax : bx) - pad;
-  final right = (ax > bx ? ax : bx) + pad;
-  final top = (ay < by ? ay : by) - pad;
-  final bottom = (ay > by ? ay : by) + pad;
-  return right >= near.left &&
-      left <= near.right &&
-      bottom >= near.top &&
-      top <= near.bottom;
+  return _hits(
+    stroke.points,
+    eraser,
+    radius,
+    query: near,
+    stopAtFirst: true,
+  ).hit;
 }
 
 /// Cuts [stroke] where the eraser passes. Unchanged strokes return null.
@@ -87,37 +40,48 @@ List<StrokeObject>? eraseRegion(
   if (!hit.hit) {
     return null;
   }
-  final runs = <List<StrokePoint>>[];
-  var current = <StrokePoint>[];
-  for (var index = 0; index < stroke.points.length; index++) {
-    if (hit.erased[index]) {
-      if (current.isNotEmpty) {
-        runs.add(current);
-        current = [];
-      }
-      continue;
-    }
-    current.add(stroke.points[index]);
-    if (hit.cutAfter[index]) {
-      runs.add(current);
-      current = [];
+  final runs = <({List<StrokePoint> points, double offset})>[];
+  final events = {...hit.erased, ...hit.cutAfter}.toList()..sort();
+  final points = stroke.points;
+  var from = 0;
+  void append(int end) {
+    if (end <= from) return;
+    final offset = stroke.dashRatio >= 0.999 || stroke.dashCycle <= 0
+        ? 0.0
+        : points is FrozenStrokePoints
+        ? points.distanceAt(from)
+        : strokeLength(points.sublist(0, from + 1));
+    runs.add((
+      points: points is FrozenStrokePoints
+          ? points.slice(from, end)
+          : points.sublist(from, end),
+      offset: stroke.dashOffset + offset,
+    ));
+  }
+
+  for (final index in events) {
+    if (hit.erased.contains(index)) {
+      append(index);
+      from = index + 1;
+    } else if (hit.cutAfter.contains(index)) {
+      append(index + 1);
+      from = index + 1;
     }
   }
-  if (current.isNotEmpty) {
-    runs.add(current);
-  }
+  append(points.length);
   return [
     for (final run in runs)
-      if (run.isNotEmpty)
+      if (run.points.isNotEmpty)
         StrokeObject(
           id: newId(),
           tool: stroke.tool,
           color: stroke.color,
           baseWidth: stroke.baseWidth,
-          points: run,
+          points: run.points,
           finalized: true,
           dashCycle: stroke.dashCycle,
           dashRatio: stroke.dashRatio,
+          dashOffset: run.offset,
         ),
   ];
 }
@@ -126,41 +90,63 @@ class _Hit {
   const _Hit({required this.hit, required this.erased, required this.cutAfter});
 
   final bool hit;
-  final List<bool> erased;
-  final List<bool> cutAfter;
+  final Set<int> erased;
+  final Set<int> cutAfter;
 }
 
-_Hit _hits(List<StrokePoint> points, List<Offset> eraser, double radius) {
-  final erased = List<bool>.filled(points.length, false);
-  final cutAfter = List<bool>.filled(points.length, false);
+_Hit _hits(
+  List<StrokePoint> points,
+  List<Offset> eraser,
+  double radius, {
+  Rect? query,
+  bool stopAtFirst = false,
+}) {
+  final erased = <int>{}, cutAfter = <int>{};
   if (points.isEmpty || eraser.isEmpty) {
     return _Hit(hit: false, erased: erased, cutAfter: cutAfter);
   }
-  var hit = false;
-  for (var index = 0; index < points.length; index++) {
-    final point = points[index];
-    final reach = radius + point.width / 2;
-    if (_nearEraser(Offset(point.x, point.y), eraser, reach)) {
-      erased[index] = true;
-      hit = true;
+  var bounds = Rect.fromPoints(eraser.first, eraser.first);
+  for (final point in eraser.skip(1)) {
+    bounds = bounds.expandToInclude(Rect.fromPoints(point, point));
+  }
+  final near = query ?? bounds.inflate(radius);
+  final ranges = points is FrozenStrokePoints
+      ? points.ranges(near)
+      : [(0, points.length)];
+  for (final range in ranges) {
+    for (var index = range.$1; index < range.$2; index++) {
+      final point = points[index];
+      if (_nearEraser(
+        Offset(point.x, point.y),
+        eraser,
+        radius + point.width / 2,
+      )) {
+        erased.add(index);
+        if (stopAtFirst) {
+          return _Hit(hit: true, erased: erased, cutAfter: cutAfter);
+        }
+      }
+      if (index >= points.length - 1) continue;
+      final end = points[index + 1];
+      if (!end.gap &&
+          _segmentHitsEraser(
+            Offset(point.x, point.y),
+            Offset(end.x, end.y),
+            eraser,
+            radius + (point.width + end.width) / 4,
+          )) {
+        cutAfter.add(index);
+        if (stopAtFirst) {
+          return _Hit(hit: true, erased: erased, cutAfter: cutAfter);
+        }
+      }
     }
   }
-  for (var index = 0; index < points.length - 1; index++) {
-    final start = points[index];
-    final end = points[index + 1];
-    final reach = radius + (start.width + end.width) / 4;
-    if (!end.gap &&
-        _segmentHitsEraser(
-          Offset(start.x, start.y),
-          Offset(end.x, end.y),
-          eraser,
-          reach,
-        )) {
-      cutAfter[index] = true;
-      hit = true;
-    }
-  }
-  return _Hit(hit: hit, erased: erased, cutAfter: cutAfter);
+  return _Hit(
+    hit: erased.isNotEmpty || cutAfter.isNotEmpty,
+    erased: erased,
+    cutAfter: cutAfter,
+  );
 }
 
 bool _nearEraser(Offset point, List<Offset> eraser, double reach) {

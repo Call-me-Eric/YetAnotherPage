@@ -187,16 +187,13 @@ class _PenPresetArcState extends State<PenPresetArc> {
     final children = <Widget>[
       Positioned.fill(
         child: IgnorePointer(
-          child: CustomPaint(
-            painter: _ArcLinePainter(widget.center),
-          ),
+          child: CustomPaint(painter: _ArcLinePainter(widget.center)),
         ),
       ),
     ];
     for (var index = 0; index < pieces.length; index++) {
       final piece = pieces[index];
-      final angle =
-          PenPresetArc.start + index * PenPresetArc.gap - _scroll;
+      final angle = PenPresetArc.start + index * PenPresetArc.gap - _scroll;
       if (angle < PenPresetArc.start - 0.05 ||
           angle > PenPresetArc.start + PenPresetArc.sweep + 0.05) {
         continue;
@@ -268,7 +265,9 @@ class _PenPresetArcState extends State<PenPresetArc> {
         width: width,
         onChanged: (value) {
           width = value;
-          widget.onChanged(palette.selectWidth(index).updateWidth(index, value));
+          widget.onChanged(
+            palette.selectWidth(index).updateWidth(index, value),
+          );
         },
       ),
     );
@@ -380,9 +379,21 @@ class _WidthMark extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          width.toStringAsFixed(1),
-          style: const TextStyle(fontSize: 11, color: Color(0xFF222222)),
+        SizedBox(
+          height: 12,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(
+              width.toStringAsFixed(1),
+              maxLines: 1,
+              softWrap: false,
+              style: const TextStyle(
+                fontSize: 11,
+                height: 1,
+                color: Color(0xFF222222),
+              ),
+            ),
+          ),
         ),
         const SizedBox(height: 2),
         Container(
@@ -566,7 +577,9 @@ class _WidthDialogState extends State<_WidthDialog> {
         height: 220,
         child: Column(
           children: [
-            Expanded(child: _LinePreview(color: widget.color, width: _width)),
+            Expanded(
+              child: _LinePreview(color: widget.color, width: _width),
+            ),
             Row(
               children: [
                 Expanded(
@@ -710,7 +723,8 @@ class _ColorDialogState extends State<_ColorDialog> {
                 ButtonSegment(value: true, label: Text('RGB')),
               ],
               selected: {_rgb},
-              onSelectionChanged: (value) => setState(() => _rgb = value.single),
+              onSelectionChanged: (value) =>
+                  setState(() => _rgb = value.single),
             ),
             const SizedBox(height: 12),
             if (_rgb)
@@ -790,7 +804,10 @@ class _HsvBoard extends StatelessWidget {
                       hsv.saturation * 2 - 1,
                       (1 - hsv.value) * 2 - 1,
                     ),
-                    child: const Icon(Icons.circle_outlined, color: Colors.white),
+                    child: const Icon(
+                      Icons.circle_outlined,
+                      color: Colors.white,
+                    ),
                   ),
                 ),
               );
@@ -821,7 +838,8 @@ class _SvPainter extends CustomPainter {
     canvas.drawRect(
       rect,
       Paint()
-        ..shader = LinearGradient(colors: [Colors.white, hue]).createShader(rect),
+        ..shader = LinearGradient(colors: [Colors.white, hue])
+            .createShader(rect),
     );
     canvas.drawRect(
       rect,
@@ -866,7 +884,10 @@ class _RgbBoard extends StatelessWidget {
                 child: CustomPaint(
                   painter: _RgPainter(color.b),
                   child: Align(
-                    alignment: Alignment(color.r * 2 - 1, (1 - color.g) * 2 - 1),
+                    alignment: Alignment(
+                      color.r * 2 - 1,
+                      (1 - color.g) * 2 - 1,
+                    ),
                     child: const Icon(
                       Icons.circle_outlined,
                       color: Colors.white,
@@ -901,8 +922,7 @@ class _RgPainter extends CustomPainter {
     final red = Color.from(alpha: 1, red: 1, green: 0, blue: blue);
     canvas.drawRect(
       rect,
-      Paint()
-        ..shader = LinearGradient(colors: [base, red]).createShader(rect),
+      Paint()..shader = LinearGradient(colors: [base, red]).createShader(rect),
     );
     canvas.drawRect(
       rect,

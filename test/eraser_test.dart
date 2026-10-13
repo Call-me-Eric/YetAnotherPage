@@ -1,8 +1,39 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yet_another_page/src/ink/eraser.dart';
 import 'package:yet_another_page/src/ink/stroke.dart';
 
 void main() {
+  test(
+    'a local cut in a hundred-thousand-sample stroke preserves distant ink',
+    () {
+      final points = [
+        for (var i = 0; i < 100000; i++)
+          mouseSample(x: i * 0.1, y: 0, time: i * 0.001, baseWidth: 3),
+      ];
+      final stroke = StrokeObject(
+        id: 'long',
+        tool: 'pen',
+        color: penColor,
+        baseWidth: 3,
+        points: points,
+        finalized: true,
+      );
+      final timer = Stopwatch()..start();
+      final pieces = eraseRegion(stroke, const [Offset(5000, 0)], radius: 4)!;
+      timer.stop();
+      expect(pieces, hasLength(2));
+      expect(pieces.first.points.first.x, 0);
+      expect(pieces.last.points.last.x, closeTo(9999.9, 0.00001));
+      expect(pieces.first.points.last.x, lessThan(4995));
+      expect(pieces.last.points.first.x, greaterThan(5005));
+      expect(() => pieces.first.points.clear(), throwsUnsupportedError);
+      debugPrint(
+        '100000-sample local region cut: ${timer.elapsedMilliseconds} ms',
+      );
+    },
+  );
+
   test('object eraser removes only the stroke it touches', () {
     final line = _line(const [0, 20, 40]);
     expect(strokeHitsEraser(line, const [Offset(20, 0)]), isTrue);

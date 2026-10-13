@@ -1,3 +1,5 @@
+import '../ink/stroke.dart';
+
 import 'dart:convert';
 
 const _encoder = JsonEncoder.withIndent('  ');
@@ -62,6 +64,7 @@ class LayerFile {
     required this.deletedObjectIds,
     this.visible = true,
     this.locked = false,
+    this.strokeCache = const {},
   });
 
   final String id;
@@ -71,11 +74,15 @@ class LayerFile {
   final bool visible;
   final bool locked;
 
+  /// In-memory geometry only; never serialized into the file format.
+  final Map<String, StrokeObject> strokeCache;
+
   LayerFile copyWith({
     bool? visible,
     bool? locked,
     List<Object?>? objects,
     List<String>? deletedObjectIds,
+    Map<String, StrokeObject>? strokeCache,
   }) {
     return LayerFile(
       id: id,
@@ -84,6 +91,7 @@ class LayerFile {
       deletedObjectIds: deletedObjectIds ?? this.deletedObjectIds,
       visible: visible ?? this.visible,
       locked: locked ?? this.locked,
+      strokeCache: strokeCache ?? this.strokeCache,
     );
   }
 
@@ -97,10 +105,21 @@ class LayerFile {
   };
 
   factory LayerFile.fromJson(Map<String, Object?> json) {
+    final raw = json['objects']! as List<Object?>;
+    final cache = {for (final stroke in strokesIn(raw)) stroke.id: stroke};
     return LayerFile(
       id: json['id']! as String,
       name: json['name']! as String,
-      objects: (json['objects']! as List<Object?>).toList(),
+      objects: [
+        for (final object in raw)
+          if (object is Map &&
+              object['type'] == 'stroke' &&
+              cache.containsKey(object['id']))
+            cache[object['id']]!.toJson()
+          else
+            object,
+      ],
+      strokeCache: cache,
       deletedObjectIds: (json['deletedObjectIds']! as List<Object?>)
           .cast<String>(),
       visible: json['visible'] as bool? ?? true,

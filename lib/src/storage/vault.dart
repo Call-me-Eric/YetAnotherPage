@@ -1,3 +1,4 @@
+import 'dart:isolate';
 import 'dart:convert';
 import 'dart:io';
 
@@ -85,7 +86,23 @@ class NoteNameTaken implements Exception {
   String toString() => '已经有名为「$title」的笔记';
 }
 
-class Vault implements NoteLibrary {
+/// Optional recovery capability for libraries that persist handwriting.
+abstract interface class StrokeRecoveryStore {
+  Future<void> checkpointStroke(
+    String directoryName, {
+    required String pageId,
+    required String layerId,
+    required StrokeObject stroke,
+    required List<StrokePoint> samples,
+  });
+  Future<void> finishCheckpoint(
+    String directoryName, {
+    required String pageId,
+    required String strokeId,
+  });
+}
+
+class Vault implements NoteLibrary, StrokeRecoveryStore {
   Vault(this.root);
 
   final Directory root;
@@ -95,15 +112,23 @@ class Vault implements NoteLibrary {
   static const stylusFileName = 'stylus.json';
   static const noteSuffix = '.yep';
 
-  Future<PenPalette> readPenPalette() async {
-    final file = File('${root.path}/$penFileName');
+  Future<PenPalette> readPenPalette({bool highlighter = false}) async {
+    final fallback = highlighter
+        ? PenPalette.highlighter()
+        : PenPalette.initial();
+    final file = File(
+      '${root.path}/${highlighter ? 'highlighter.json' : penFileName}',
+    );
     if (!await file.exists()) {
-      return PenPalette.initial();
+      return fallback;
     }
     try {
-      return PenPalette.fromJson(jsonDecode(await file.readAsString()));
+      return PenPalette.fromJson(
+        jsonDecode(await file.readAsString()),
+        highlighter: highlighter,
+      );
     } on FormatException {
-      return PenPalette.initial();
+      return fallback;
     }
   }
 
@@ -121,17 +146,20 @@ class Vault implements NoteLibrary {
 
   Future<void> writeStylusPreferences(StylusPreferences preferences) async {
     await root.create(recursive: true);
-    await writeAtomic(
+    await writeJsonAtomic(
       File('${root.path}/$stylusFileName'),
-      encodeJson(preferences.toJson()),
+      preferences.toJson(),
     );
   }
 
-  Future<void> writePenPalette(PenPalette palette) async {
+  Future<void> writePenPalette(
+    PenPalette palette, {
+    bool highlighter = false,
+  }) async {
     await root.create(recursive: true);
-    await writeAtomic(
-      File('${root.path}/$penFileName'),
-      encodeJson(palette.toJson()),
+    await writeJsonAtomic(
+      File('${root.path}/${highlighter ? 'highlighter.json' : penFileName}'),
+      palette.toJson(),
     );
   }
 
@@ -242,7 +270,14 @@ class Vault implements NoteLibrary {
   }
 
   @override
-  Future<OpenNote> openNote(String directoryName) async {
+  Future<OpenNote> openNote(String directoryName) {
+    final rootPath = root.path;
+    return Isolate.run(
+      () => Vault(Directory(rootPath))._openNote(directoryName),
+    );
+  }
+
+  Future<OpenNote> _openNote(String directoryName) async {
     final directory = Directory('${root.path}/$directoryName');
     final manifestFile = File('${directory.path}/manifest.json');
     final manifest = NoteManifest.fromJson(
@@ -279,11 +314,116 @@ class Vault implements NoteLibrary {
         ),
       );
     }
-    return OpenNote(
-      directoryName: directoryName,
-      manifest: manifest,
-      pages: pages,
+    return _recoverCheckpoints(
+      OpenNote(directoryName: directoryName, manifest: manifest, pages: pages),
     );
+  }
+
+  @override
+  Future<void> checkpointStroke(
+    String directoryName, {
+    required String pageId,
+    required String layerId,
+    required StrokeObject stroke,
+    required List<StrokePoint> samples,
+  }) async {
+    if (samples.isEmpty) return;
+    final directory = Directory(
+      '${root.path}/$directoryName/pages/$pageId/journal',
+    );
+    await directory.create(recursive: true);
+    final file = File('${directory.path}/${stroke.id}.jsonl');
+    final lines = <String>[];
+    if (!await file.exists()) {
+      lines.add(
+        jsonEncode({
+          'layerId': layerId,
+          'stroke': stroke.copyWith(points: []).toJson(),
+        }),
+      );
+    }
+    lines.addAll(samples.map((sample) => jsonEncode(sample.toJson())));
+    await file.writeAsString(
+      '${lines.join('\n')}\n',
+      mode: FileMode.append,
+      flush: true,
+    );
+  }
+
+  @override
+  Future<void> finishCheckpoint(
+    String directoryName, {
+    required String pageId,
+    required String strokeId,
+  }) async {
+    final file = File(
+      '${root.path}/$directoryName/pages/$pageId/journal/$strokeId.jsonl',
+    );
+    if (await file.exists()) await file.delete();
+  }
+
+  Future<OpenNote> _recoverCheckpoints(OpenNote note) async {
+    for (final page in note.pages) {
+      final directory = Directory(
+        '${root.path}/${note.directoryName}/pages/${page.id}/journal',
+      );
+      if (!await directory.exists()) continue;
+      final files = await directory
+          .list()
+          .where((entry) => entry is File && entry.path.endsWith('.jsonl'))
+          .cast<File>()
+          .toList();
+      files.sort((a, b) => a.path.compareTo(b.path));
+      for (final file in files) {
+        final lines = await file.readAsLines();
+        if (lines.isEmpty) continue;
+        Map<String, dynamic> header;
+        try {
+          header = jsonDecode(lines.first) as Map<String, dynamic>;
+        } on FormatException {
+          continue;
+        }
+        final layerId = header['layerId'];
+        if (layerId is! String || header['stroke'] is! Map) continue;
+        final layers = page.layers.where(
+          (layer) =>
+              layer.id == layerId && !page.deletedLayerIds.contains(layer.id),
+        );
+        if (layers.isEmpty) continue;
+        final stroke = StrokeObject.fromJson(
+          Map<String, Object?>.from(header['stroke'] as Map),
+        );
+        // A crash between committing the layer and removing the journal must
+        // not resurrect a subsequently erased/undone stroke.
+        final known = layers.single.objects.any(
+          (object) => object is Map && object['id'] == stroke.id,
+        );
+        if (!known) {
+          final samples = <StrokePoint>[];
+          for (var i = 1; i < lines.length; i++) {
+            try {
+              samples.add(
+                StrokePoint.fromJson(
+                  Map<String, Object?>.from(jsonDecode(lines[i]) as Map),
+                ),
+              );
+            } on FormatException {
+              break;
+            }
+          }
+          if (samples.isNotEmpty) {
+            note = await changeMarks(
+              note,
+              pageId: page.id,
+              layerId: layerId,
+              add: [bakePenStroke(stroke.copyWith(points: samples))],
+            );
+          }
+        }
+        await file.delete();
+      }
+    }
+    return note;
   }
 
   @override
@@ -297,9 +437,9 @@ class Vault implements NoteLibrary {
     }
     final nextName = desired;
     final updated = note.manifest.copyWith(title: displayTitle);
-    await writeAtomic(
+    await writeJsonAtomic(
       File('${current.path}/manifest.json'),
-      encodeJson(updated.toJson()),
+      updated.toJson(),
     );
     if (nextName != note.directoryName) {
       await current.rename('${root.path}/$nextName');
@@ -330,9 +470,9 @@ class Vault implements NoteLibrary {
     await _writePage(directory, page);
     final order = [...note.manifest.pageOrder];
     order.insert(before ? index : index + 1, page.id);
-    await writeAtomic(
+    await writeJsonAtomic(
       File('${directory.path}/manifest.json'),
-      encodeJson(note.manifest.copyWith(pageOrder: order).toJson()),
+      note.manifest.copyWith(pageOrder: order).toJson(),
     );
     return openNote(note.directoryName);
   }
@@ -434,28 +574,16 @@ class Vault implements NoteLibrary {
       (item) => item.id == layerId,
       orElse: () => throw ArgumentError('未知图层 $layerId'),
     );
-    var version = box.version;
-    for (final object in layer.objects) {
-      final existing = TextBox.fromObject(object);
-      if (existing != null && existing.id == box.id) {
-        version = existing.version + 1;
-      }
-    }
-    final next = box.copyWith(version: version < 1 ? 1 : version);
-    final memoryObjects = [
-      for (final object in layer.objects)
-        if (TextBox.fromObject(object)?.id != box.id) object,
-      next.toJson(),
-    ];
+    final memoryObjects = replaceTextBox(layer.objects, box);
     final directory = Directory(
       '${root.path}/${note.directoryName}/pages/$pageId',
     );
     final stored = layer.copyWith(
       objects: [for (final object in memoryObjects) _storedObject(object)],
     );
-    await writeAtomic(
+    await writeJsonAtomic(
       File('${directory.path}/$layerId.json'),
-      encodeJson(stored.toJson()),
+      stored.toJson(),
     );
     return OpenNote(
       directoryName: note.directoryName,
@@ -502,9 +630,9 @@ class Vault implements NoteLibrary {
     final stored = layer.copyWith(
       objects: [for (final object in memoryObjects) _storedObject(object)],
     );
-    await writeAtomic(
+    await writeJsonAtomic(
       File('${directory.path}/$layerId.json'),
-      encodeJson(stored.toJson()),
+      stored.toJson(),
     );
     return OpenNote(
       directoryName: note.directoryName,
@@ -514,7 +642,10 @@ class Vault implements NoteLibrary {
           if (item.id == page.id)
             page.updateLayer(
               layer.id,
-              (_) => layer.copyWith(objects: memoryObjects),
+              (_) => layer.copyWith(
+                objects: memoryObjects,
+                strokeCache: {...layer.strokeCache, stroke.id: stroke},
+              ),
             )
           else
             item,
@@ -543,25 +674,35 @@ class Vault implements NoteLibrary {
       }
     }
     deleted.removeWhere(restore.contains);
+    final known = <String>{
+      for (final object in layer.objects) ?_strokeId(object),
+    };
+    // Idempotent: memory may already contain [add] from a sync local apply.
     final memoryObjects = [
       ...layer.objects,
-      for (final stroke in add) stroke.toJson(),
+      for (final stroke in add)
+        if (known.add(stroke.id)) stroke.toJson(),
     ];
     final directory = Directory(
       '${root.path}/${note.directoryName}/pages/$pageId',
     );
-    await _spillStrokes(directory, memoryObjects);
+    await _spillStrokes(directory, [for (final stroke in add) stroke.toJson()]);
     final stored = layer.copyWith(
       objects: [for (final object in memoryObjects) _storedObject(object)],
       deletedObjectIds: deleted,
     );
-    await writeAtomic(
+    await writeJsonAtomic(
       File('${directory.path}/$layerId.json'),
-      encodeJson(stored.toJson()),
+      stored.toJson(),
     );
+    final cache = {...layer.strokeCache};
+    for (final stroke in add) {
+      cache.putIfAbsent(stroke.id, () => stroke);
+    }
     final memory = layer.copyWith(
       objects: memoryObjects,
       deletedObjectIds: deleted,
+      strokeCache: cache,
     );
     return OpenNote(
       directoryName: note.directoryName,
@@ -614,11 +755,12 @@ class Vault implements NoteLibrary {
       }
       final file = File('${strokes.path}/$id.json');
       if (await file.exists()) {
-        continue;
+        final previous = jsonDecode(await file.readAsString());
+        if (previous is Map && previous['finalized'] == true) continue;
       }
-      await writeAtomic(
+      await writeJsonAtomic(
         file,
-        encodeJson(Map<String, Object?>.from(object).cast<String, Object>()),
+        Map<String, Object?>.from(object).cast<String, Object>(),
       );
     }
   }
@@ -640,7 +782,7 @@ class Vault implements NoteLibrary {
         }
         final file = File('${pageDirectory.path}/strokes/$id.json');
         if (!await file.exists()) {
-          continue;
+          throw FileSystemException('笔画引用缺少对应文件，停止打开以防覆盖丢失的数据', file.path);
         }
         expanded.add(jsonDecode(await file.readAsString()));
         continue;
@@ -661,9 +803,9 @@ class Vault implements NoteLibrary {
       '${root.path}/${note.directoryName}/pages/$pageId',
     );
     final layer = page.layers.firstWhere((item) => item.id == layerId);
-    await writeAtomic(
+    await writeJsonAtomic(
       File('${directory.path}/$layerId.json'),
-      encodeJson(layer.toJson()),
+      layer.toJson(),
     );
     return openNote(note.directoryName);
   }
@@ -680,9 +822,9 @@ class Vault implements NoteLibrary {
     required NoteManifest manifest,
     required List<PageFile> pages,
   }) async {
-    await writeAtomic(
+    await writeJsonAtomic(
       File('${directory.path}/manifest.json'),
-      encodeJson(manifest.toJson()),
+      manifest.toJson(),
     );
     for (final page in pages) {
       await _writePage(directory, page);
@@ -693,14 +835,14 @@ class Vault implements NoteLibrary {
   Future<void> _writePage(Directory noteDirectory, PageFile page) async {
     final pageDirectory = Directory('${noteDirectory.path}/pages/${page.id}');
     await pageDirectory.create(recursive: true);
-    await writeAtomic(
+    await writeJsonAtomic(
       File('${pageDirectory.path}/page.json'),
-      encodeJson(page.toJson()),
+      page.toJson(),
     );
     for (final layer in page.layers) {
-      await writeAtomic(
+      await writeJsonAtomic(
         File('${pageDirectory.path}/${layer.id}.json'),
-        encodeJson(layer.toJson()),
+        layer.toJson(),
       );
     }
   }

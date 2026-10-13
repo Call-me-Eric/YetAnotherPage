@@ -128,17 +128,17 @@ vault/
 }
 ```
 
-`strokes/{strokeId}.json` 是完整笔画，`type` 为 `stroke`。打开笔记时 `_expandStrokeRefs` 把 `strokeRef` 换回完整笔画，找不到对应文件就跳过这一项；图层文件里直接放着完整 `stroke` 的旧数据也读得进来。写回时 `_storedObject` 把笔画收成 `strokeRef`，文字框原样留下。
+`strokes/{strokeId}.json` 是完整笔画，`type` 为 `stroke`。打开笔记时 `_expandStrokeRefs` 把 `strokeRef` 换回完整笔画，找不到对应文件就明确报错并停止打开，避免将残缺内容再次保存；图层文件里直接放着完整 `stroke` 的旧数据也读得进来。写回时 `_storedObject` 把笔画收成 `strokeRef`，文字框原样留下。
 
-写入用 `writeAtomic`：先写 `路径.tmp` 并 flush，再 rename 覆盖目标；rename 失败且目标已存在时，先删目标再 rename。写到一半崩溃时原来的文件还在。新建笔记先写 `.{目录名}.partial`，写完再改名成正式目录。
+写入用 `writeAtomic`：先写带唯一后缀的临时文件并 flush，再 rename 覆盖目标。POSIX 使用原子替换；任意 I/O 失败都不先删除原文件。Windows 在无法覆盖现有目标时采用备份与失败回滚，仍需要 Windows 真机验证崩溃窗口。新建笔记先写 `.{目录名}.partial`，写完再改名成正式目录。
 
-笔画文件只写一次：`_spillStrokes` 看到 `strokes/{id}.json` 已存在就跳过。所以重命名之类的操作不会把每条笔画的点重写一遍（`renameNote` 也不会重读页面）。
+已完成笔画的文件只写一次：`_spillStrokes` 看到已有文件中的 `finalized` 为 true 就跳过；未完成的旧草稿允许更新。`changeMarks` 只检查本次新增笔画的文件，不扫描整层全部笔画。`writeJsonAtomic` 在工作 isolate 中编码与写入，`Vault.openNote` 的读取、解码和几何预热也在工作 isolate 中执行。所以重命名之类的操作不会把每条笔画的点重写一遍（`renameNote` 也不会重读页面）。
 
 > 目前没有格式迁移代码。要改字段，先加 `formatVersion` 分支，不要把 v1 的文件读坏。
 
 ## 5. `NoteLibrary` 与 `Vault`
 
-`NoteLibrary` 是存储接口，真库是 `Vault`，测试里用内存实现。所有方法都接收并返回不可变的 `OpenNote`；**不要假设 `Vault` 会改你手里的旧对象**，调用方要把返回值赋回去。
+`NoteLibrary` 是存储接口，真库是 `Vault`，测试里用内存实现。所有方法都接收并返回 `OpenNote` 快照；**不要假设 `Vault` 会改你手里的旧对象**。页面结构操作接收返回值，编辑显示则先同步修改内存，异步保存的返回值不得替换当前画布。
 
 | 方法 | 行为与边界 |
 | --- | --- |
@@ -161,21 +161,19 @@ vault/
 
 删除不把对象从队列里抹掉，而是把 id 记进 `deletedObjectIds`。撤销一次删除时，`changeMarks` 的 `restore` 会把这个 id 从墓碑里拿掉。
 
-`_NotePageState` 里有一份界面用的乐观隐藏集 `_hidden`：抬笔橡皮或删除时先把 id 放进去，等 `Vault` 返回新 `OpenNote` 后再清掉，这样界面不会闪回旧笔画。
+`applyMarks` 同步更新内存 `OpenNote`。内存是显示的唯一事实来源，没有 `_hidden` 或 `_settled` 影子状态；保存捕获操作完成时的快照，不能在异步回调里读最新状态后再次套用旧操作。
 
-撤销是线性的：一条 `_MarkEdit` 记 `pageId`、`layerId`、`added`（这次新增的笔画）、`tombstoned`（这次新记的墓碑）。`_commit` 把它压进 `_undoStack` 并清空重做栈；`_retint` 在撤销/重做时交换两边的角色（撤销 = 把 `added` 墓碑掉、把 `tombstoned` 恢复；重做反过来），再调用 `changeMarks`。
+撤销是线性的：一条 `_MarkEdit` 同时记录新增笔画、旧对象墓碑、文字修改与新文字框。`_commit` 压入撤销栈并清空重做栈；`_retint` 交换新增和墓碑的角色。文字框创建也能撤销。套索取出只是临时显示事务，贴回时才将原对象与最终对象记成一个完整命令；撤销不能停在只有取出、没有贴回的中间状态。
 
-- 在笔记里换页**不清空**撤销栈；关掉 `NotePage` 时栈随 State 一起消失，再次打开后旧操作不能撤。
-- 删除一页会顺手把该页在撤销栈、重做栈和 `_settled` 里的记录清掉。
-- 所有写盘都挂在 `_saveChain` 这条 Future 链上串行执行，避免两次写互相覆盖。
+写盘通过 `WriteQueue` 按顺序执行。失败的任务留在队首，后续重试必须先完成它，新的快照不能越过旧任务。页面/图层调整、重命名、删除笔记之前先结束当前编辑并排空写入；正常返回上一页也先排空写入，失败时提示并留在笔记里。换页不清历史，关闭笔记清历史。
 
-写盘时机是「编辑发生时」，不是退出时：抬笔（`_persist`）、橡皮抬笔（`_commit`）、创建文字框（`_persistText`）、失焦提交、移动结束、改大小结束。关掉笔记只丢撤销栈，不把写入推迟。
+`StrokeRecoveryStore` 是可选的增量恢复接口，`Vault` 实现它。书写时按约 32 ms 的采样时间间隔将新增原始采样追加到 `pages/{pageId}/journal/{strokeId}.jsonl`，没有每次重写整条笔画。抬笔后先保存最终笔画，再删恢复日志。打开时将未提交的日志恢复成完成笔画；最后一行被截断时仅保留之前的完整记录。已经存在于对象队列的 id 不再恢复，包括已有墓碑的对象，防止擦除/撤销后复活。它只能恢复已完成实际写盘的采样，不保证程序被强杀时尚在内存或等待 I/O 的样本。
 
 ## 7. 笔画
 
 ### 7.1 存什么
 
-`StrokeObject`：`id`、`tool`（现在钢笔写 `"pen"`）、`color`（`0xAARRGGBB`，钢笔是 `penColor = 0xFF000000`）、`baseWidth`（`penBaseWidth = 3.0`）、`points`、`finalized`。
+`StrokeObject`：`id`、`tool`（钢笔写 `"pen"`，荧光笔写 `"highlighter"`）、`color`（`0xAARRGGBB`，钢笔是 `penColor = 0xFF000000`）、`baseWidth`（`penBaseWidth = 3.0`）、`points`、`finalized`。
 
 `StrokePoint`：`x`、`y`、相对起笔的 `time`（秒）、`width`、`height`、`opacity`、`pressure`，可选 `azimuth`、`altitude`。宽和高在采样时就算进点里，抬笔后不再改；渲染直接用这些值，不用新的粗细算法重算旧笔画。
 
@@ -201,7 +199,7 @@ lookahead：还没连上的点要等后面的样本才画，`_holdCount` 按相�
 
 ### 7.4 形状怎么拟合
 
-拟合是**局部**二次曲线，不是整条笔画一次拟合。窗口是 `raw[index-1, index+2)`，x 和 y 分开做最小二乘：`p(t) = at² + bt + c`。`StrokeCursor` 里的 `_PolySums` 用滑动窗口加减样本，避免每个点都从头求和；缓存的多项式先用 `_polyFits`（平均误差 ≤ 8）判断还能不能用。
+拟合是**局部**二次曲线，不是整条笔画一次拟合。窗口是 `raw[index-1, index+2)`，x 和 y 分开做最小二乘：`p(t) = at² + bt + c`。`_PolySums` 将当前窗口的首点时间归零，再换算成毫秒，在仅三个点的局部窗口重建求和，避免长笔画累计时间四次方相减导致的数值误差；缓存的多项式先用 `_polyFits`（平均误差 ≤ 8）判断还能不能用。
 
 曲线端点钉在真实采样上：先算出曲线，再按参数把起点和终点的误差线性摊回去，所以画出来的曲线一定经过这两个采样点。
 
@@ -222,41 +220,33 @@ lookahead：还没连上的点要等后面的样本才画，`_holdCount` 按相�
 
 ### 7.6 画出来
 
-`paintStroke` 用圆头 `drawLine` 把相邻点连起来，线宽取两端宽度的平均值；只有一个点时画圆。`paintStrokeCover` 用更宽的圆头描同一条线（`pad` 外扩），给橡皮的遮盖与挖空用。`outlineOf` 把点列包成一条带粗细的闭合 `Path`。
+`paintStroke` 的实线按相近宽度分组合成圆头、圆角路径；只有一个点时画圆。虚线沿弧长截出每段实线，再以连续的变宽轮廓一次填充，避免独立矩形之间的接缝和毛刺。`paintStrokeCover` 用更宽的圆头描同一条线（`pad` 外扩），给橡皮的遮盖与挖空用。`outlineOf` 把点列包成一条带粗细的闭合 `Path`。
 
 ### 7.7 现在只被测试用到的 API
 
-`densifySamples`、`undrawnStrokes`、`outlineOf` 在生产代码里没有调用方，只被 `test/stroke_test.dart` 使用；常量 `curveWindow = 0.032` 目前没有任何引用。改动它们前先想清楚是删掉还是接进管线，不要留着一半的旧实现。
+`densifySamples`、`undrawnStrokes` 在生产代码里没有调用方，只被 `test/stroke_test.dart` 使用；`outlineOf` 已用于虚线实线段的连续轮廓填充。常量 `curveWindow = 0.032` 目前没有任何引用。改动它们前先想清楚是删掉还是接进管线，不要留着一半的旧实现。
 
 ## 8. 画布与瓦片
 
-`PageCanvas` 把所有页纵向排开，页间 `pageGap = 32`，四周 `Padding(48)`。外面是 `InteractiveViewer`：`constrained: false`、`panEnabled: false`、`scaleEnabled: true`、`minScale: 0.2`、`maxScale: 4`、`boundaryMargin: 800`。**平移是 `NotePage` 自己在变换矩阵上做的**，不交给 InteractiveViewer；捏合缩放仍由它负责。
+`PageCanvas` 纵向排列页面。通过视图变换的逆矩阵计算可见范围；屏幕外页面仅保留等尺寸占位，不建立文本或墨迹渲染器。可见范围预留 128 point 缓冲。
 
-每一页是 `_PageSheet`：白底、`ClipRect`，里面从下到上是「已提交墨迹 → 实时笔画 → 页码标签 → fade 层 → 橡皮预览框 → 文字框层 → 笔尖光标」。当前页边框用主色（宽 3），其他页用轮廓色（宽 1）。页左下角小字显示页 id，方便对文件。
+`_PageSheet._orderedContent` 按图层从底到顶、每层对象队列的顺序交错绘制笔画和文字。连续笔画形成一个 `_CommittedInk` 渲染组；文字在自己的原有位置，编辑不会将它挪到队尾。实时笔画放在当前可写层顶部，上方锁定图层仍能覆盖它。
 
-`_CommittedInk` 把已提交的墨迹按 `_tileSize = 256` point 的瓦片光栅化：每块瓦片是一张 `ui.Image`，外包 `RepaintBoundary`，`FilterQuality.none`，按 1:1 贴上。像素尺寸是 `round(瓦片宽高 × devicePixelRatio × viewScale)`。
+`_CommittedInk` 使用 256 point 瓦片，只对页面内当前可见范围生成图像；离屏图像超过每个渲染组 64 MiB 的预算时回收，当前可见图像不强制丢弃。不可变的完成笔画按需缓存成 `ui.Picture`，离开可见范围及其缓冲区的矢量缓存也会回收。修改对象、透明度或图层顺序时只标记涉及瓦片的受影响矩形。旧瓦片的其他像素继续显示，受影响区域同步显示当前矢量对象；后台复制旧瓦片、清除该矩形、按当前对象顺序重建该矩形，最后一次性换图并撤去矢量过渡。所有重建有代数校验，过期异步结果只能释放，不能回写。缩放结束更新 `viewScale` 后重新生成对应分辨率的瓦片。
 
-- `viewScale` 是 `NotePage._tileScale`，只有比例变化超过 **0.04** 才更新（`_settleScale`）。比例一变，瓦片代数 `_generation` 加一，旧图丢掉重画；捏合过程中不重切瓦片，旧图被拉大或缩小。
-- `picture.toImage` 是异步的。抬笔后**不要**先清掉实时墨迹再等瓦片：实时层要留到对应瓦片落地（`_persist(publish: true)` 会在 `saveStroke` 返回后把 `_settled` 里的那条拿掉）。
-- 橡皮打上去的 `InkPatch` 也先画进相关瓦片，`onApplied` 之后再收起补丁。`_dabbed` 标记让「擦掉一条笔画」不必整页重画；只有真正删掉笔画时（`removed` 非空）才清空瓦片重建。
+这与长期保留橡皮遮罩不同：缓存只描述当前对象的显示结果，后续新笔画不会再被旧遮罩挖掉。交叉笔画也能从真实对象重建。`InkPatch` 仅保留兼容接口，不再作为破坏对象外观的事实来源。
 
-`_LiveInk` 负责正在画的那条笔画，不每帧重画整页：把已经稳定的前缀冻成瓦片，末端保留约 **8** 个点做矢量尾巴，每多大约 **24** 个点再烘一批。换笔画或缩放比例变化超过 0.04 时清空重来。
-
-`StrokeFade` 是对象橡皮的拖动预览：`_FadePainter` 用 `saveLayer` + `Color(0x99FFFFFF)` 的 `paintStrokeCover`（外扩 `_pad = 2`）把整条笔画洗淡，边缘和内部同一透明度。
+`_LiveInk` 缓存当前笔画的稳定前缀，末端约 8 个点保持矢量尾巴。`_imagedDistance` 记录已缓存前缀的弧长，每个新块与尾巴传给 `paintStroke` 的 `distanceOffset` 延续整笔虚线相位。区域擦除另在片段中保存 `dashOffset`，与实时分块偏移相加；旧笔画缺少该字段时按 0 读取。复制保留相位，缩放时相位与循环长度一起缩放。完成后通过内存对象和受影响区域的矢量过渡接到瓦片，显示交接不等待磁盘。
 
 ## 9. 橡皮
 
-`InkTool`：`pen`、`text`、`objectEraser`、`regionEraser`。橡皮半径 `eraserRadius = 14`。
+工具栏只显示一个橡皮。笔画与区域两种模式共用 `_eraserRadius`，默认 14，调整范围 4–48，显示半径与几何命中使用同一个值。
 
-**对象橡皮**：拖动时用 `_InkLocator`（格边长 `cell = 48`，只测橡皮附近的笔画）找出相交的笔画放进 `StrokeFade`；抬笔时把这些 id 一起墓碑，并用 `_punchStrokes` 先铺不透明白遮盖、再 `BlendMode.dstOut` 挖掉（外扩 3），然后清掉 fade。用的是已经在 fade 里的列表，不再全页重扫。
+对象橡皮通过 `_InkLocator` 查询附近笔画。空间索引覆盖笔画点以及相邻点之间的实际线段，不能只索引端点。桶坐标使用 `(x, y)` 二元组，避免负坐标或大坐标的整数编码碰撞。接触对象后直接将其原有绘制结果整体降至 40% 透明度，边缘一起降低，并保留对象堆叠顺序；抬笔后记录墓碑。
 
-**区域橡皮**：拖动时每移动超过 1 point 就 `_punchEraser` 一次（`dstOut`，线宽 `(eraserRadius + 2) × 2`），立刻挖掉碰到的瓦片；抬笔时对当前层里所有未删除、未隐藏的笔画跑 `eraseRegion`：整条擦掉得到空列表，部分擦掉得到若干新 `StrokeObject`（**新 id**、`finalized: true`、点还是原来存下的宽高，只是少了被擦的那段），旧 id 全部墓碑。
+区域橡皮在落笔和移动时立即对候选对象运行 `eraseRegion`。`_regionPieces` 按原对象记录当前剩余片段，并在原队列位置插入新片段；抬笔只提交一次撤销命令，包含原笔画 id 与最终片段。删除中间片段不会让它们留在持久化队列中。
 
-`_editableStrokes` 把图层文件里的笔画和 `_settled`（刚抬笔、可能还没写回磁盘的笔画）合起来，按 id 去重。
-
-对象橡皮的挖空会连笔画底下的墨迹一起挖掉；撤销只把这条笔画画回来，**底下被挖掉的墨迹不会自动补回**。撤销一条普通钢笔（只有被拿掉的 id、没有先前的挖空）会清空瓦片并重画剩余笔画。
-
-当前可画图层是该页**最上面一层可见且未锁定**的图层（`_drawingLayer`）；隐藏或锁定的层不接收新笔画。
+当前可画图层仍是该页最上面一层可见且未锁定的图层。对象命中、编辑和渲染必须共同遵守页面 id、图层可见状态与墓碑。
 
 ## 10. 手势与平移
 
@@ -312,7 +302,7 @@ iOS 的适配在 `ios/Runner/AppDelegate.swift`：`ApplePencilSideButton` 在 `d
 
 ## 13. 悬停光标
 
-非触摸的 hover 显示笔尖：钢笔是小点（白 4.5 / 黑 2.4），橡皮是白底黑边的圆圈，半径用 `eraserRadius`。文字工具不显示点也不显示圆，但仍把位置交给 `onTip` 和 `onTextHover`，供侧键选中文字框。按下绘画时笔尖位置继续更新。不要对悬停坐标做几何预测。
+非触摸的 hover 显示笔尖：钢笔按当前选中的颜色和基础笔宽显示圆点；荧光笔按当前颜色、固定笔宽和 `highlighterOpacity = 0.35` 显示半透明圆形，页面缩放同时作用于笔迹和预览。橡皮是白底黑边的圆圈，半径用 `eraserRadius`。文字工具不显示点也不显示圆，但仍把位置交给 `onTip` 和 `onTextHover`，供侧键选中文字框。按下绘画时笔尖位置继续更新。不要对悬停坐标做几何预测。
 
 ## 14. 图层与库界面
 
@@ -347,11 +337,11 @@ flutter test
 - `raw` 与 `painted` 不要共享同一个列表；实时笔画的 `shouldRepaint` 不要去比较一份还在被改的列表。
 - 橡皮的补丁（`InkPatch`）和 fade（`StrokeFade`）都带 `pageId`，不要画到别的页上。
 - 区域橡皮只重画碰到的瓦片，不要退化成整页重建。
-- 抬笔后不要先清实时墨迹再等瓦片，实时层要留到瓦片落地。
+- 抬笔后必须同步交接到已提交对象的矢量过渡，不能产生等待瓦片的空帧。
 - 单指才有惯性；两指平移不要甩。
 - 文字失焦时先读 controller，再重置 controller；`_textDrafts` 的丢弃条件不能放宽。
 - 最后一页不能删；删页和删对象都是墓碑，文件留在磁盘上。
-- 写盘时机在编辑发生时，不要挪到退出时；所有写盘继续走 `_saveChain`。
+- 写盘时机在编辑发生时，不要挪到退出时；所有写盘继续走 `WriteQueue`。
 - 笔画文件只写一次，`strokes/{id}.json` 不要被反复覆盖。
 - 平台代码只调用 `sideButton` / `report`，不要在原生代码里决定界面行为。
 - 不要把 PencilKit 用于存储或渲染。
@@ -360,11 +350,9 @@ flutter test
 
 这些是当前实现的边界，不是「下次顺手改掉」的行为：
 
-- 荧光笔、套索、图片、PDF 导入、导出副本、`.yep` 导入导出、嵌套文件夹、局域网同步都还没做；`assets/` 只是预留目录。
-- 中文组字过程仍会进入文字框源码；文字编辑没有单独的撤销栈。
+- 图片、PDF 导入、导出副本、`.yep` 导入导出、嵌套文件夹、局域网同步都还没做；`assets/` 只是预留目录。
+- 文字编辑失焦后记入笔记统一撤销栈；不是逐个字符的独立历史。
 - 长笔画上的圆仍可能有直线棱：被拒绝的弦和过短的弦变成直线之后不会再改，因为拟合只看附近的样本，看不到整圆。要改就改 `_appendArc`，不要在绘制时把已经存下的点整体重算。
-- 对象橡皮挖空会挖掉底下的墨迹，撤销不能把它补回来。
-- 文字框画在全部墨迹之上，不按图层与笔画交错。
 - 双指移动没有我们自己的惯性；捏合的收尾动画是 `InteractiveViewer` 的。
 - iOS 合并触点、Android historical 采样还没接进笔画。
 - 页外的笔画是画的时候裁掉，不是存盘时裁成页内几何。
@@ -379,3 +367,25 @@ flutter test
 4. 不要在原生代码里打开菜单或切换工具。笔记页和库页面已经在监听 `stylusSideButton`。
 
 iOS 的对照实现是 `ApplePencilSideButton` 和 `PencilSqueezeRelay`（`ios/Runner/AppDelegate.swift`）。
+
+## 18. 参考原则与修正记录
+
+本次只参考 Saber 对笔画几何缓存、实时笔画与页面内容分开管理、历史项记录完整操作的设计思路，不复制第三方实现。参考：[Stroke](https://github.com/saber-notes/saber/blob/main/lib/components/canvas/_stroke.dart)、[EditorHistory](https://github.com/saber-notes/saber/blob/main/lib/data/editor/editor_history.dart)。本项目继续使用自己的笔画格式、拟合算法、瓦片缓存与 `.yep` 存储。
+
+逐项问题、修复位置与验证范围见 [底层修正记录](refactor-notes.md)。
+
+## 19. 荧光笔与密集笔画
+
+荧光笔复用钢笔的采样和稳定曲线管线，但保持固定笔宽。默认预设为 12、18、24，默认颜色为黄色，整体透明度为 0.35。`highlighter.json` 保存独立预设，不覆盖钢笔的 `pen.json`；两种工具都通过预设长条和二级圆弧调整。
+
+`paintStroke` 对单条荧光笔的几何先以不透明颜色画入临时层，再统一应用透明度。实时前缀和尾巴也先作为一个整体合成，所以单笔自交、分块交接不会叠出深色接缝。不同笔画分别合成，重叠会加深。不能改成每个采样段分别使用半透明 paint。
+
+`FrozenStrokePoints` 复制原始输入后冻结，复制笔画元数据时直接共享它。区域擦除剩余片段使用只读切片，并复用根采样块的边界；命中只检查附近块。`StrokeJsonPoints` 是只读惰性 JSON 点列表，生成内存快照不逐点分配字典，实际遍历交给存储线程。`LayerFile.strokeCache` 只存在内存里，不写入格式字段；加载时普通逐点 JSON 对象被转换成冻结几何与惰性列表，避免长期保留两套点数据。
+
+`StrokeSpatialIndex` 按 32 个采样点的块建立 128 point 网格，只对新 id 建立空间索引，并释放不再活动的对象。局部查询返回当前对象顺序下的候选笔画，橡皮、套索和瓦片更新再做精确判断。`_editableStrokes` 缓存图层几何，渲染不能在每个对象循环中重复构建墓碑集合。
+
+套索在连续拖动、旋转和缩放时只更新累计矩阵；手势结束也不遍历所有点。复制或最终贴回时才生成相应几何。文字 Markdown 的 source 和宽度不变时复用渲染 widget。
+
+性能回归见 `test/spatial_index_test.dart`（一万笔画、32 万采样点）、`test/eraser_test.dart`（十万点笔画局部擦除）和 `test/widget_test.dart`（三千笔画密集页面的书写、橡皮、套索变换和缩放）。这些测试覆盖正确性与局部查询范围，运行耗时是本机测试环境观测，不能等同于 iPad/Android 的真实帧率。像素一致性见 `test/brush_render_test.dart`。
+
+钢笔默认虚实预设为纯实线和虚实各占半，循环长度均为 24 point。读取旧版未调整的单一纯实线默认预设时会补上半虚半实；写回后通过 `dashPresetVersion` 标记，后续用户主动减少槽位不会再自动补回。荧光笔与自定义虚实预设保持原样。

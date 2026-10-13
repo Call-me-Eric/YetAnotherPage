@@ -1,7 +1,10 @@
+import 'package:yet_another_page/src/ink/pen_palette.dart';
+
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:yet_another_page/src/ink/marks.dart';
 import 'package:yet_another_page/src/ink/stroke.dart';
 import 'package:yet_another_page/src/ink/text_box.dart';
 import 'package:yet_another_page/src/paper.dart';
@@ -22,6 +25,187 @@ void main() {
       await root.delete(recursive: true);
     }
   });
+
+  test(
+    'highlighter settings and geometry survive reopening independently',
+    () async {
+      await vault.writePenPalette(
+        PenPalette.highlighter().selectWidth(0),
+        highlighter: true,
+      );
+      expect((await vault.readPenPalette()).width, 3);
+      expect((await vault.readPenPalette(highlighter: true)).width, 12);
+      final note = await vault.createNote('荧光笔');
+      final mark = StrokeObject(
+        id: 'marker',
+        tool: 'highlighter',
+        color: 0xFFFFFF00,
+        baseWidth: 18,
+        points: [
+          mouseSample(x: 10, y: 10, time: 0, baseWidth: 18),
+          mouseSample(x: 100, y: 10, time: 0.1, baseWidth: 18),
+        ],
+        finalized: true,
+      );
+      await vault.saveStroke(
+        note,
+        pageId: note.pages.single.id,
+        layerId: note.pages.single.layers.single.id,
+        stroke: mark,
+      );
+      final reopened = await vault.openNote(note.directoryName);
+      final stored = liveStrokes(reopened.pages.single.layers.single).single;
+      expect(stored.tool, 'highlighter');
+      expect(stored.points.last.width, 18);
+    },
+  );
+
+  test('unfinished samples recover after a truncated journal tail', () async {
+    final note = await vault.createNote('恢复');
+    final pageId = note.pages.single.id;
+    final layerId = note.pages.single.layers.single.id;
+    final draft = StrokeObject(
+      id: 'draft',
+      tool: 'pen',
+      color: penColor,
+      baseWidth: 3,
+      points: const [],
+      finalized: false,
+    );
+    final samples = [
+      mouseSample(x: 10, y: 20, time: 0, baseWidth: 3),
+      mouseSample(x: 30, y: 20, time: 0.01, baseWidth: 3),
+    ];
+    await vault.checkpointStroke(
+      note.directoryName,
+      pageId: pageId,
+      layerId: layerId,
+      stroke: draft,
+      samples: samples,
+    );
+    final file = File(
+      '${root.path}/${note.directoryName}/pages/$pageId/journal/draft.jsonl',
+    );
+    await file.writeAsString('{"x":', mode: FileMode.append);
+    final recovered = await vault.openNote(note.directoryName);
+    final ink = liveStrokes(recovered.pages.single.layers.single);
+    expect(ink.single.id, 'draft');
+    expect(ink.single.finalized, isTrue);
+    expect(ink.single.points.last.x, 30);
+    expect(await file.exists(), isFalse);
+    expect(
+      liveStrokes(
+        (await vault.openNote(note.directoryName)).pages.single.layers.single,
+      ),
+      hasLength(1),
+    );
+  });
+
+  test('a stale checkpoint cannot resurrect an erased object', () async {
+    var note = await vault.createNote('旧日志');
+    final pageId = note.pages.single.id;
+    final layerId = note.pages.single.layers.single.id;
+    final point = mouseSample(x: 10, y: 20, time: 0, baseWidth: 3);
+    final stroke = StrokeObject(
+      id: 'done',
+      tool: 'pen',
+      color: penColor,
+      baseWidth: 3,
+      points: [point],
+      finalized: true,
+    );
+    await vault.checkpointStroke(
+      note.directoryName,
+      pageId: pageId,
+      layerId: layerId,
+      stroke: stroke,
+      samples: [point],
+    );
+    note = await vault.changeMarks(
+      note,
+      pageId: pageId,
+      layerId: layerId,
+      add: [stroke],
+      tombstone: ['done'],
+    );
+    final reopened = await vault.openNote(note.directoryName);
+    expect(liveStrokes(reopened.pages.single.layers.single), isEmpty);
+    expect(
+      reopened.pages.single.layers.single.deletedObjectIds,
+      contains('done'),
+    );
+  });
+
+  test(
+    'a provisional stroke file can be extended before finalization',
+    () async {
+      var note = await vault.createNote('草稿');
+      final pageId = note.pages.single.id;
+      final layerId = note.pages.single.layers.single.id;
+      final draft = StrokeObject(
+        id: 'draft',
+        tool: 'pen',
+        color: penColor,
+        baseWidth: 3,
+        points: [mouseSample(x: 10, y: 20, time: 0, baseWidth: 3)],
+        finalized: false,
+      );
+      note = await vault.saveStroke(
+        note,
+        pageId: pageId,
+        layerId: layerId,
+        stroke: draft,
+      );
+      final finished = draft.copyWith(
+        finalized: true,
+        points: [
+          ...draft.points,
+          mouseSample(x: 30, y: 20, time: 0.1, baseWidth: 3),
+        ],
+      );
+      await vault.saveStroke(
+        note,
+        pageId: pageId,
+        layerId: layerId,
+        stroke: finished,
+      );
+      final reopened = await vault.openNote(note.directoryName);
+      expect(
+        liveStrokes(reopened.pages.single.layers.single).single.points,
+        hasLength(2),
+      );
+    },
+  );
+
+  test(
+    'missing referenced ink fails visibly instead of silently dropping it',
+    () async {
+      var note = await vault.createNote('缺失文件');
+      final pageId = note.pages.single.id;
+      final layerId = note.pages.single.layers.single.id;
+      final stroke = StrokeObject(
+        id: 'missing',
+        tool: 'pen',
+        color: penColor,
+        baseWidth: 3,
+        points: [mouseSample(x: 1, y: 2, time: 0, baseWidth: 3)],
+        finalized: true,
+      );
+      note = await vault.changeMarks(
+        note,
+        pageId: pageId,
+        layerId: layerId,
+        add: [stroke],
+      );
+      await File(
+        '${root.path}/${note.directoryName}/pages/$pageId/strokes/missing.json',
+      ).delete();
+      await expectLater(
+        vault.openNote(note.directoryName),
+        throwsA(isA<FileSystemException>()),
+      );
+    },
+  );
 
   test('device id stays in the vault and out of the note', () async {
     final first = await vault.deviceId();
@@ -250,6 +434,40 @@ void main() {
       ignored.pages.single.layers.single.objects,
       saved.pages.single.layers.single.objects,
     );
+  });
+
+  test('changeMarks does not duplicate strokes already in memory', () async {
+    final created = await vault.createNote('幂等');
+    final page = created.pages.single;
+    final layer = page.layers.single;
+    final stroke = StrokeObject(
+      id: 'dup',
+      tool: 'pen',
+      color: penColor,
+      baseWidth: penBaseWidth,
+      finalized: true,
+      points: [mouseSample(x: 1, y: 2, time: 0, baseWidth: penBaseWidth)],
+    );
+    final local = applyMarks(
+      created,
+      pageId: page.id,
+      layerId: layer.id,
+      add: [stroke],
+    );
+    final saved = await vault.changeMarks(
+      local,
+      pageId: page.id,
+      layerId: layer.id,
+      add: [stroke],
+    );
+    expect(saved.pages.single.layers.single.objects, hasLength(1));
+    final again = await vault.changeMarks(
+      saved,
+      pageId: page.id,
+      layerId: layer.id,
+      add: [stroke],
+    );
+    expect(again.pages.single.layers.single.objects, hasLength(1));
   });
 
   test('erasing a stroke records the id and undo clears that mark', () async {
