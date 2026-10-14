@@ -509,42 +509,32 @@ void _appendArc(
     remember();
     return;
   }
-  if (chord < directJoinDistance) {
-    final bulge = _allowedBulge(raw, index, start, end, chord, cursor);
-    if (bulge < 0.7) {
-      _appendChord(result, start, end, straightSpacing);
-      remember();
-      return;
-    }
-  }
-  final poly = _polyFor(raw, index, cursor);
-  if (poly == null || (end.time - start.time).abs() <= 0.0001) {
+  final span = end.time - start.time;
+  if (span <= 0.0001) {
     _appendChord(result, start, end, straightSpacing);
     remember();
     return;
   }
-  final atStart = poly.at(start.time);
-  final atEnd = poly.at(end.time);
+  final allowed = _allowedBulge(raw, index, start, end, chord, cursor);
+  final tangentIn = _nodeTangent(raw, index - 1, span);
+  final tangentOut = _nodeTangent(raw, index, span);
+  final scale = _bulgeScale(tangentIn, tangentOut, allowed);
+  final enter = tangentIn * scale;
+  final leave = tangentOut * scale;
   Offset at(double u) {
-    final time = start.time + (end.time - start.time) * u;
-    final point = poly.at(time);
+    final u2 = u * u;
+    final u3 = u2 * u;
+    final h00 = 2 * u3 - 3 * u2 + 1;
+    final h10 = u3 - 2 * u2 + u;
+    final h01 = -2 * u3 + 3 * u2;
+    final h11 = u3 - u2;
     return Offset(
-      point.dx + (start.x - atStart.dx) * (1 - u) + (end.x - atEnd.dx) * u,
-      point.dy + (start.y - atStart.dy) * (1 - u) + (end.y - atEnd.dy) * u,
+      h00 * start.x + h10 * enter.dx + h01 * end.x + h11 * leave.dx,
+      h00 * start.y + h10 * enter.dy + h01 * end.y + h11 * leave.dy,
     );
   }
 
-  final allowed = _allowedBulge(raw, index, start, end, chord, cursor);
   final rough = at(0.5);
-  if (_hypot(
-        rough.dx - (start.x + end.x) / 2,
-        rough.dy - (start.y + end.y) / 2,
-      ) >
-      allowed) {
-    _appendChord(result, start, end, straightSpacing);
-    remember();
-    return;
-  }
   final spacing = allowed > 2 ? tightSpacing : straightSpacing;
   final lengthGuess = math.max(
     chord,
@@ -565,6 +555,54 @@ void _appendArc(
     );
   }
   remember();
+}
+
+/// The tangent a segment leaves a node with, in pixels per unit of that
+/// segment's own parameter. Both segments meeting at a node ask for the same
+/// index, so they agree on the tangent and the joint comes out smooth. Only the
+/// node before it and the node after it are read, which is the same look-ahead
+/// [_holdCount] already waits for.
+Offset _nodeTangent(List<StrokePoint> raw, int index, double span) {
+  final middle = raw[index];
+  final before = index > 0 ? raw[index - 1] : null;
+  final after = index + 1 < raw.length ? raw[index + 1] : null;
+  double dx;
+  double dy;
+  double dt;
+  if (before != null && after != null) {
+    dx = after.x - before.x;
+    dy = after.y - before.y;
+    dt = after.time - before.time;
+  } else if (after != null) {
+    dx = after.x - middle.x;
+    dy = after.y - middle.y;
+    dt = after.time - middle.time;
+  } else if (before != null) {
+    dx = middle.x - before.x;
+    dy = middle.y - before.y;
+    dt = middle.time - before.time;
+  } else {
+    return Offset.zero;
+  }
+  if (dt <= 0) {
+    return Offset.zero;
+  }
+  return Offset(dx / dt * span, dy / dt * span);
+}
+
+/// A cubic Hermite leaves the chord by `0.125 * (enter - leave)` at its middle,
+/// which is what [_allowedBulge] caps. Shrinking both tangents by one factor
+/// lands exactly on the cap, and it only changes the speed along the curve, not
+/// the direction, so the neighbouring joints stay smooth.
+double _bulgeScale(Offset enter, Offset leave, double allowed) {
+  final bulge = _hypot(
+    (enter.dx - leave.dx) * 0.125,
+    (enter.dy - leave.dy) * 0.125,
+  );
+  if (bulge <= allowed) {
+    return 1;
+  }
+  return allowed / bulge;
 }
 
 double _allowedBulge(
@@ -658,6 +696,10 @@ void _addIfLater(List<StrokePoint> result, StrokePoint point) {
   result.add(point);
 }
 
+// The parabola fit below is no longer called: [_appendArc] draws each segment
+// with a cubic Hermite built from shared node tangents. It is left in place so
+// the two curves can be compared and the rewrite reverted quickly.
+// ignore: unused_element
 class _Poly {
   const _Poly(
     this.ax,
@@ -685,6 +727,7 @@ class _Poly {
   }
 }
 
+// ignore: unused_element
 _Poly? _polyFor(List<StrokePoint> raw, int index, StrokeCursor? cursor) {
   final from = math.max(0, index - 1);
   final to = math.min(raw.length, index + 2);
@@ -704,6 +747,7 @@ _Poly? _polyFor(List<StrokePoint> raw, int index, StrokeCursor? cursor) {
   return _fitPoly(raw.sublist(from, to));
 }
 
+// ignore: unused_element
 bool _polyFits(List<StrokePoint> raw, int from, int to, _Poly poly) {
   var error = 0.0;
   var count = 0;
@@ -716,6 +760,7 @@ bool _polyFits(List<StrokePoint> raw, int from, int to, _Poly poly) {
   return count >= 3 && error / count <= 8;
 }
 
+// ignore: unused_element
 class _PolySums {
   double origin = 0;
   double st4 = 0;
@@ -831,6 +876,7 @@ class _PolySums {
   }
 }
 
+// ignore: unused_element
 _Poly? _fitPoly(List<StrokePoint> points) {
   if (points.length < 3) {
     return null;
